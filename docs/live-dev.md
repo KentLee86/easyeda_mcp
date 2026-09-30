@@ -60,6 +60,8 @@ Other helpers (run through `dev/live/node.sh node ...` unless noted):
 | `dev/live/ui.mjs "<text>" ... shot:<png>` | Click UI elements by visible text; take screenshots |
 | `dev/live/dump-raw.mjs > dev/live/.work/raw.json` | Dump the per-page schematic data the extension collects |
 | `node dev/live/compare-netlist.mjs <raw.json> <netlist.enet>` (host) | Compare the schematic analysis with EasyEDA Pro's own netlist export |
+| `dev/live/pcb-layer-pdf.mjs <out.pdf>` | PCB PDF with one page per layer and mirroring off, through the Export PDF dialog (`getPdfFile` ignores its arguments and prints the dialog's settings, which persist for later API/MCP exports) |
+| `dev/live/crop-pdf-to-board.py in.pdf out.pdf` (host) | Crop every page to the board (pages are sized to all objects, so one stray primitive makes them huge) and turn pages EasyEDA printed rotated (Bottom Silkscreen comes out rotated 180°) back; checks each page against the Multi-layer page |
 | `dev/live/render-3d.mjs <dir>` | Open the 3D preview and save iso/top/bottom/front/left PNGs (no API exists for the 3D view, so views are switched through the UI) |
 | `dev/live/window.sh` (host) | Resize the window to 1920x1080 so extension header menus are not folded |
 
