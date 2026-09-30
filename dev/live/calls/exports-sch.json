@@ -1,0 +1,6 @@
+[["easyeda_export_bom",{"format":"csv","outputPath":"dev/live/.work/exports/","overwrite":true,"maxInlineChars":300,"timeoutMs":20000},500],
+ ["easyeda_export_bom",{"format":"json","outputPath":"dev/live/.work/exports/","overwrite":true,"maxInlineChars":200},400],
+ ["easyeda_export_netlist",{"outputPath":"dev/live/.work/exports/","overwrite":true,"maxInlineChars":100},300],
+ ["easyeda_export_pdf",{"outputPath":"dev/live/.work/exports/sch.pdf","overwrite":true},300],
+ ["easyeda_find_component",{"query":"R1","limit":20},200],
+ ["easyeda_confirmed_action",{"action":"save","confirmation":"CONFIRM save"},300]]

@@ -1,6 +1,7 @@
 import * as z from "zod/v4";
 import type { EasyEdaBridge } from "../bridge/EasyEdaBridge.js";
 import { ok, fail } from "./toolResult.js";
+import { isExportedFile, writeExport, type ExportKind } from "./exportFiles.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { PROTOCOL_VERSION, type EditorStatus } from "../protocol/messages.js";
 
@@ -390,56 +391,66 @@ export function registerEasyEdaTools(server: McpServer, bridge: EasyEdaBridge): 
     summary: "Requested EasyEDA Pro board zoom."
   });
 
-  registerReadTool(server, bridge, {
+  const exportOutput = {
+    outputPath: z.string().min(1).optional().describe("File path, or a directory ending in / . Default: $EASYEDA_MCP_EXPORT_DIR or <tmp>/easyeda-mcp-exports/."),
+    overwrite: z.boolean().default(false).describe("Replace an existing file at the target path."),
+    maxInlineChars: z.number().int().min(0).max(200_000).default(20_000).describe("For text exports, how much of the content to return inline.")
+  };
+
+  registerExportTool(server, bridge, {
     name: "easyeda_export_bom",
+    kind: "bom",
     title: "Export EasyEDA Pro BOM",
-    description: "Exports a BOM from the active EasyEDA Pro project through the extension.",
+    description: "Exports the BOM of the active project to a local file and returns its path; csv/json content is also returned as text (EasyEDA's tab-separated UTF-16 output is converted to UTF-8 CSV).",
     method: "exportBom",
     inputSchema: {
       fileName: z.string().min(1).optional(),
       format: z.enum(["csv", "xlsx", "json"]).default("csv"),
       scope: z.enum(["pcb", "schematic", "auto"]).default("auto"),
+      ...exportOutput,
       timeoutMs: DefaultTimeoutSchema.default(30_000)
-    },
-    summary: "Requested EasyEDA Pro BOM export."
+    }
   });
 
-  registerReadTool(server, bridge, {
+  registerExportTool(server, bridge, {
     name: "easyeda_export_netlist",
+    kind: "netlist",
     title: "Export EasyEDA Pro netlist",
-    description: "Exports a netlist from the active EasyEDA Pro schematic or PCB through the extension.",
+    description: "Exports the netlist of the active schematic or PCB to a local file and returns its path and text content.",
     method: "exportNetlist",
     inputSchema: {
       fileName: z.string().min(1).optional(),
       scope: z.enum(["pcb", "schematic", "auto"]).default("auto"),
+      ...exportOutput,
       timeoutMs: DefaultTimeoutSchema.default(30_000)
-    },
-    summary: "Requested EasyEDA Pro netlist export."
+    }
   });
 
-  registerReadTool(server, bridge, {
+  registerExportTool(server, bridge, {
     name: "easyeda_export_gerber",
+    kind: "gerber",
     title: "Export EasyEDA Pro Gerber",
-    description: "Exports Gerber fabrication files from the active EasyEDA Pro PCB through the extension.",
+    description: "Exports Gerber fabrication files (zip) of the active PCB to a local file and returns its path.",
     method: "exportGerber",
     inputSchema: {
       fileName: z.string().min(1).optional(),
+      ...exportOutput,
       timeoutMs: DefaultTimeoutSchema.default(60_000)
-    },
-    summary: "Requested EasyEDA Pro Gerber export."
+    }
   });
 
-  registerReadTool(server, bridge, {
+  registerExportTool(server, bridge, {
     name: "easyeda_export_pdf",
+    kind: "pdf",
     title: "Export EasyEDA Pro PDF",
-    description: "Exports a PDF from the active EasyEDA Pro document through the extension.",
+    description: "Exports a PDF of the active PCB or schematic to a local file and returns its path.",
     method: "exportPdf",
     inputSchema: {
       fileName: z.string().min(1).optional(),
       scope: z.enum(["pcb", "schematic", "auto"]).default("auto"),
+      ...exportOutput,
       timeoutMs: DefaultTimeoutSchema.default(60_000)
-    },
-    summary: "Requested EasyEDA Pro PDF export."
+    }
   });
 
   server.registerTool(
@@ -516,6 +527,56 @@ type ReadToolConfig = {
   inputSchema: z.ZodRawShape;
   summary: string;
 };
+
+type ExportToolConfig = {
+  name: string;
+  kind: ExportKind;
+  title: string;
+  description: string;
+  method: string;
+  inputSchema: Record<string, z.ZodType>;
+};
+
+function registerExportTool(server: McpServer, bridge: EasyEdaBridge, config: ExportToolConfig): void {
+  server.registerTool(
+    config.name,
+    {
+      title: config.title,
+      description: config.description,
+      inputSchema: config.inputSchema,
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false
+      }
+    } as never,
+    async (args: Record<string, unknown>) => {
+      try {
+        const { timeoutMs, outputPath, overwrite, maxInlineChars, ...params } = args as Record<string, unknown> & {
+          timeoutMs?: number;
+          outputPath?: string;
+          overwrite?: boolean;
+          maxInlineChars?: number;
+        };
+        const result = await bridge.call(config.method, params, timeoutMs);
+        if (!isExportedFile(result)) {
+          return ok(`EasyEDA Pro did not return file contents for ${config.name}.`, { result });
+        }
+        const written = await writeExport(result, {
+          kind: config.kind,
+          format: typeof params.format === "string" ? params.format : undefined,
+          outputPath,
+          overwrite,
+          maxInlineChars
+        });
+        return ok(`Saved ${config.kind} export to ${written.path} (${written.bytes} bytes).`, { result: written });
+      } catch (error) {
+        return fail(error);
+      }
+    }
+  );
+}
 
 function registerReadTool(
   server: McpServer,

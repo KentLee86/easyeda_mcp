@@ -516,7 +516,17 @@ async function findComponent(params: Record<string, any>): Promise<Record<string
     ...toArray(pcb).map((item) => ({ source: "pcb", item })),
     ...toArray(schematic).map((item) => ({ source: "schematic", item }))
   ];
-  const matches = all.filter(({ item }) => JSON.stringify(item).toLowerCase().includes(query)).slice(0, limit);
+  // Designator equality wins ("R1" must not pick R10); otherwise match designator,
+  // value, name or footprint substrings.
+  const fields = ({ item }: { item: unknown }) => {
+    const simple = simplifyPrimitive(item);
+    return {
+      designator: String(simple.designator ?? "").toLowerCase(),
+      text: [simple.designator, simple.value, (item as any)?.name, JSON.stringify(simple.footprint ?? "")].map((value) => String(value ?? "").toLowerCase())
+    };
+  };
+  const exact = all.filter((entry) => fields(entry).designator === query);
+  const matches = (exact.length > 0 ? exact : all.filter((entry) => fields(entry).text.some((value) => value.includes(query)))).slice(0, limit);
 
   return {
     query,
@@ -712,35 +722,44 @@ async function zoomBoard(): Promise<Record<string, unknown>> {
 
 async function exportBom(params: Record<string, any>): Promise<Record<string, unknown>> {
   const fileName = params.fileName ?? `easyeda-bom-${timestamp()}`;
-  const format = params.format ?? "csv";
-  const api = pickManufactureApi(params.scope, "getBomFile");
-  const file = await api.getBomFile(fileName, format);
-  return saveApiFile(file, `${fileName}.${format}`, true);
+  // Pro produces csv (tab-separated UTF-16) or xlsx; the server converts csv to real CSV/JSON.
+  const fileType = params.format === "xlsx" ? "xlsx" : "csv";
+  const api = await pickManufactureApi(params.scope, "getBomFile");
+  const file = await api.getBomFile(fileName, fileType);
+  return fileContents(file, `${fileName}.${fileType}`);
 }
 
 async function exportNetlist(params: Record<string, any>): Promise<Record<string, unknown>> {
   const fileName = params.fileName ?? `easyeda-netlist-${timestamp()}`;
-  const api = pickManufactureApi(params.scope, "getNetlistFile");
+  const api = await pickManufactureApi(params.scope, "getNetlistFile");
   const file = await api.getNetlistFile(fileName, params.netlistType);
-  return saveApiFile(file, `${fileName}.net`, true);
+  if (!extractFile(file) && api === eda.sch_ManufactureData) {
+    // Pro 3.2 returns nothing for some (e.g. imported) schematics; the PCB path works.
+    throw apiError("export_unavailable", "EasyEDA Pro returned no schematic netlist for this project. Open the board's PCB and export with scope \"pcb\".");
+  }
+  return fileContents(file, `${fileName}.enet`);
 }
 
 async function exportGerber(params: Record<string, any>): Promise<Record<string, unknown>> {
   ensureApi("pcb_ManufactureData", "getGerberFile");
   const fileName = params.fileName ?? `easyeda-gerber-${timestamp()}`;
   const file = await eda.pcb_ManufactureData.getGerberFile(fileName);
-  return saveApiFile(file, `${fileName}.zip`, true);
+  return fileContents(file, `${fileName}.zip`);
 }
 
 async function exportPdf(params: Record<string, any>): Promise<Record<string, unknown>> {
   const fileName = params.fileName ?? `easyeda-export-${timestamp()}`;
-  if (params.scope === "schematic" || (!eda.pcb_ManufactureData?.getPdfFile && eda.sch_ManufactureData?.getExportDocumentFile)) {
-    const file = await eda.sch_ManufactureData.getExportDocumentFile(fileName, "pdf");
-    return saveApiFile(file, `${fileName}.pdf`, true);
+  const schematicActive = inferDocumentType(await optionalCall(() => eda.dmt_SelectControl.getCurrentDocumentInfo())) === "schematic";
+  const useSchematic = params.scope === "schematic"
+    || (params.scope !== "pcb" && schematicActive && eda.sch_ManufactureData?.getExportDocumentFile)
+    || (!eda.pcb_ManufactureData?.getPdfFile && eda.sch_ManufactureData?.getExportDocumentFile);
+  if (useSchematic) {
+    const file = await eda.sch_ManufactureData.getExportDocumentFile(fileName, "PDF");
+    return fileContents(file, `${fileName}.pdf`);
   }
   ensureApi("pcb_ManufactureData", "getPdfFile");
   const file = await eda.pcb_ManufactureData.getPdfFile(fileName);
-  return saveApiFile(file, `${fileName}.pdf`, true);
+  return fileContents(file, `${fileName}.pdf`);
 }
 
 async function confirmedAction(params: Record<string, any>): Promise<Record<string, unknown>> {
@@ -749,14 +768,16 @@ async function confirmedAction(params: Record<string, any>): Promise<Record<stri
   const documentUuid = pickString(documentInfo, ["uuid", "documentUuid", "id"]);
 
   if (action === "save") {
-    if (eda.pcb_Document?.save) {
-      await eda.pcb_Document.save(documentUuid);
-      return { action, saved: true, documentUuid };
+    const documentType = inferDocumentType(documentInfo);
+    const api = documentType === "pcb" ? eda.pcb_Document : documentType === "schematic" ? eda.sch_Document : undefined;
+    if (!api?.save) {
+      throw apiError("unsupported_document", `save needs an open schematic page or PCB; the active document is ${documentType}.`);
     }
-    if (eda.sch_Document?.save) {
-      await eda.sch_Document.save(documentUuid);
-      return { action, saved: true, documentUuid };
+    const saved = await api.save(documentUuid);
+    if (saved === false) {
+      throw apiError("save_failed", "EasyEDA Pro reported that the document was not saved.");
     }
+    return { action, saved: true, documentType, documentUuid };
   }
 
   if (action === "importChanges") {
@@ -765,21 +786,17 @@ async function confirmedAction(params: Record<string, any>): Promise<Record<stri
     return { action, imported: true, documentUuid: params.uuid ?? documentUuid };
   }
 
-  if (action === "autoroute") {
-    ensureApi("pcb_Document", "importAutoRouteJsonFile");
-    if (!params.params?.file) {
-      throw apiError("missing_file", "autoroute requires params.file from an EasyEDA-compatible autoroute JSON/SES file.");
+  if (action === "autoroute" || action === "autolayout") {
+    const method = action === "autoroute" ? "importAutoRouteJsonFile" : "importAutoLayoutJsonFile";
+    ensureApi("pcb_Document", method);
+    const json = params.params?.json;
+    if (typeof json !== "string" || !json.trim()) {
+      throw apiError("missing_json", `${action} requires params.json: the ${action} result JSON text from an EasyEDA-compatible router.`);
     }
-    await eda.pcb_Document.importAutoRouteJsonFile(params.params.file);
-    return { action, imported: true, betaApi: true };
-  }
-
-  if (action === "autolayout") {
-    ensureApi("pcb_Document", "importAutoLayoutJsonFile");
-    if (!params.params?.file) {
-      throw apiError("missing_file", "autolayout requires params.file from an EasyEDA-compatible autolayout JSON file.");
+    const imported = await eda.pcb_Document[method](new File([json], `${action}.json`, { type: "application/json" }));
+    if (imported === false) {
+      throw apiError("import_failed", `EasyEDA Pro rejected the ${action} JSON.`);
     }
-    await eda.pcb_Document.importAutoLayoutJsonFile(params.params.file);
     return { action, imported: true, betaApi: true };
   }
 
@@ -891,41 +908,39 @@ async function zoomToRegion(left: number, right: number, top: number, bottom: nu
   await eda.dmt_EditorControl.zoomToRegion(left, right, top, bottom);
 }
 
-function pickManufactureApi(scope: string | undefined, method: string): any {
-  if (scope === "schematic") {
+async function pickManufactureApi(scope: string | undefined, method: string): Promise<any> {
+  // The PCB API on a schematic tab (or vice versa) opens an error dialog and never
+  // resolves, so "auto" follows the active document.
+  const target = scope === "schematic" || scope === "pcb"
+    ? scope
+    : inferDocumentType(await optionalCall(() => eda.dmt_SelectControl.getCurrentDocumentInfo()));
+  if (target === "schematic") {
     ensureApi("sch_ManufactureData", method);
     return eda.sch_ManufactureData;
   }
-  if (scope === "pcb") {
+  if (target === "pcb") {
     ensureApi("pcb_ManufactureData", method);
     return eda.pcb_ManufactureData;
   }
-  if (eda.pcb_ManufactureData?.[method]) {
-    return eda.pcb_ManufactureData;
-  }
-  ensureApi("sch_ManufactureData", method);
-  return eda.sch_ManufactureData;
+  throw apiError("unsupported_document", `Open a schematic page or PCB first (active document: ${target}), or pass scope.`);
 }
 
-async function saveApiFile(file: unknown, fallbackFileName: string, betaApi: boolean): Promise<Record<string, unknown>> {
-  const normalizedFile = extractFile(file);
-  if (!normalizedFile) {
-    return {
-      saved: false,
-      file: sanitize(file),
-      reason: "EasyEDA returned a non-File value; returning it without saving.",
-      betaApi
-    };
+/** Read an EasyEDA File as base64 so the MCP server can write it (no save dialog). */
+async function fileContents(file: unknown, fallbackFileName: string): Promise<Record<string, unknown>> {
+  const blob = extractFile(file);
+  if (!blob || typeof (blob as Blob).arrayBuffer !== "function") {
+    throw apiError("export_failed", "EasyEDA Pro did not return a file for this export.", sanitize(file));
   }
-
-  ensureApi("sys_FileSystem", "saveFile");
-  const fileName = (normalizedFile as File).name || fallbackFileName;
-  const saveResult = await eda.sys_FileSystem.saveFile(normalizedFile, fileName);
+  const bytes = new Uint8Array(await (blob as Blob).arrayBuffer());
+  let binary = "";
+  for (let index = 0; index < bytes.length; index += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
+  }
   return {
-    saved: true,
-    fileName,
-    saveResult: sanitize(saveResult),
-    betaApi
+    fileName: (blob as File).name || fallbackFileName,
+    mimeType: (blob as Blob).type || undefined,
+    size: bytes.length,
+    base64: btoa(binary)
   };
 }
 
@@ -1056,6 +1071,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
+// EDMT_EditorDocumentType values from the Pro API.
+const DOCUMENT_TYPES: Record<number, string> = {
+  [-1]: "home",
+  1: "schematic", 8: "schematic", 9: "schematic",
+  3: "pcb", 12: "pcb", 15: "pcb",
+  2: "symbol", 7: "symbol", 17: "symbol", 18: "symbol", 19: "symbol", 20: "symbol", 21: "symbol", 22: "symbol", 25: "symbol", 32: "symbol",
+  4: "footprint",
+  26: "panel", 27: "panel", 29: "panel"
+};
+
 function inferDocumentType(documentInfo: unknown): string {
   const record = isRecord(documentInfo) ? documentInfo : undefined;
   const numericType = record
@@ -1066,8 +1091,9 @@ function inferDocumentType(documentInfo: unknown): string {
     ].find((value) => typeof value === "number")
     : undefined;
 
-  if (numericType === 1) return "schematic";
-  if (numericType === 2) return "pcb";
+  if (typeof numericType === "number") {
+    return DOCUMENT_TYPES[numericType] ?? "unknown";
+  }
 
   const raw = JSON.stringify(documentInfo ?? {}).toLowerCase();
   if (raw.includes("pcb")) return "pcb";

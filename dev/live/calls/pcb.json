@@ -1,0 +1,7 @@
+[["easyeda_live_status",{},200],
+ ["easyeda_export_gerber",{"outputPath":"dev/live/.work/exports/gerber.zip","overwrite":true},300],
+ ["easyeda_export_pdf",{"outputPath":"dev/live/.work/exports/pcb.pdf","overwrite":true},300],
+ ["easyeda_find_net",{"query":"GND"},200],
+ ["easyeda_confirmed_action",{"action":"save","confirmation":"CONFIRM save"},300],
+ ["easyeda_confirmed_action",{"action":"autoroute","confirmation":"CONFIRM autoroute","params":{}},300],
+ ["easyeda_confirmed_action",{"action":"save","confirmation":"not confirmed"},200]]
