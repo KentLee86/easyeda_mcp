@@ -48,6 +48,9 @@ type BridgeErrorMessage = {
 
 const WS_ID = "easyeda-mcp-bridge";
 const bridgeConfig = getBridgeConfig();
+const FAST_RETRIES_AFTER_BYE = 8;
+const FAST_OPEN_TIMEOUT_MS = 250;
+const FAST_RETRY_DELAY_MS = 50;
 
 type ConnectionPhase = "idle" | "connecting" | "connected" | "blocked";
 
@@ -64,6 +67,8 @@ type ConnectionState = {
   connectedOnce: boolean;
   /** Set when the connection dropped, so the next successful open is announced. */
   lostSinceLastOpen: boolean;
+  /** Short-timeout attempts left after a server "bye" (successor starting up). */
+  fastRetries: number;
   /** The permission dialog was shown for the current blocked episode. */
   blockedNotified: boolean;
   disposed: boolean;
@@ -84,6 +89,7 @@ const connectionState: ConnectionState = (runtimeGlobal[runtimeKey] ??= {
     attemptIndex: 0,
     connectedOnce: false,
     lostSinceLastOpen: false,
+    fastRetries: 0,
     blockedNotified: false,
     disposed: false,
     compatibility: evaluateProtocolCompatibility(PROTOCOL_VERSION)
@@ -212,7 +218,7 @@ async function startBridge(options: { reason: string; manual: boolean }): Promis
       manual: options.manual,
       shouldRetry: true
     });
-  }, bridgeConfig.openTimeoutMs);
+  }, connectionState.fastRetries > 0 ? FAST_OPEN_TIMEOUT_MS : bridgeConfig.openTimeoutMs);
 
   try {
     eda.sys_WebSocket.register(
@@ -237,6 +243,7 @@ async function startBridge(options: { reason: string; manual: boolean }): Promis
         connectionState.connectedOnce = true;
         connectionState.lostSinceLastOpen = false;
         connectionState.blockedNotified = false;
+        connectionState.fastRetries = 0;
         clearOpenTimeout();
         send({
           kind: "hello",
@@ -288,6 +295,9 @@ async function handleMessage(raw: string): Promise<void> {
     closeSocket();
     // Next attempt uses delays[attemptIndex + 1]; -1 selects delays[0] (no wait).
     connectionState.attemptIndex = -1;
+    // The successor usually binds the port within tens of ms, but a failed open
+    // gives no signal; probe quickly for a short while before the normal cadence.
+    connectionState.fastRetries = FAST_RETRIES_AFTER_BYE;
     handleConnectionFailure(normalizeError(apiError("bridge_closed", "The MCP server closed the bridge.")), {
       manual: false,
       shouldRetry: true
@@ -433,7 +443,11 @@ function handleConnectionFailure(
   if (retry && !connectionState.reconnectTimer) {
     const delays = bridgeConfig.reconnectDelayMs;
     const nextAttempt = connectionState.attemptIndex + 1;
-    const delayMs = delays[Math.min(nextAttempt, delays.length - 1)];
+    let delayMs = delays[Math.min(nextAttempt, delays.length - 1)];
+    if (connectionState.fastRetries > 0) {
+      connectionState.fastRetries -= 1;
+      delayMs = FAST_RETRY_DELAY_MS;
+    }
     connectionState.attemptIndex = nextAttempt;
     connectionState.reconnectTimer = setTimeout(() => {
       connectionState.reconnectTimer = undefined;

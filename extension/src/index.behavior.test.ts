@@ -130,6 +130,21 @@ describe("re-evaluated script (EasyEDA runs the entry again for every event)", (
   });
 });
 
+describe("server bye", () => {
+  it("probes quickly for the successor server before falling back to the normal cadence", async () => {
+    const harness = makeEda();
+    const extension = await loadExtension({ openTimeoutMs: 1_000, reconnectDelayMs: [0, 250, 500, 1_000] });
+    extension.activate("onStartupFinished");
+    await harness.registration.onOpen?.();
+    expect(harness.registerCount()).toBe(1);
+
+    await harness.registration.onMessage?.({ data: JSON.stringify({ kind: "bye" }) } as MessageEvent<string>);
+    // Nothing answers: fast attempts time out after 250 ms and retry after 50 ms.
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(harness.registerCount()).toBeGreaterThanOrEqual(4);
+  });
+});
+
 describe("bridge liveness watchdog", () => {
   it("closes the socket and re-registers when the server stays silent past livenessTimeoutMs", async () => {
     const harness = makeEda();
