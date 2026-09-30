@@ -140,6 +140,76 @@ describe("HubServer /v1/call", () => {
   });
 });
 
+describe("HubServer long-poll status", () => {
+  it("answers GET /v1/status?waitFor=connected as soon as the extension says hello", async () => {
+    const { bridge, hub } = await startHub();
+    const remote = new RemoteBridge({ token: TOKEN, httpPort: hub.port });
+    const started = Date.now();
+    const pending = remote.waitForStatus(5_000);
+    setTimeout(() => {
+      void extension(bridge);
+    }, 150);
+    const status = await pending;
+    const elapsed = Date.now() - started;
+    expect(status).toMatchObject({ connected: true, connectionState: "connected" });
+    expect(elapsed).toBeGreaterThanOrEqual(140);
+    expect(elapsed).toBeLessThan(1_500);
+  });
+
+  it("returns the current (disconnected) status at the timeout", async () => {
+    const { hub } = await startHub();
+    const remote = new RemoteBridge({ token: TOKEN, httpPort: hub.port });
+    const started = Date.now();
+    const status = await remote.waitForStatus(200);
+    expect(status.connected).toBe(false);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(190);
+  });
+
+  it("resolves waitForConnected immediately when already connected", async () => {
+    const { bridge } = await startHub();
+    await extension(bridge);
+    const started = Date.now();
+    await expect(bridge.waitForConnected(5_000)).resolves.toBe(true);
+    expect(Date.now() - started).toBeLessThan(50);
+  });
+});
+
+describe("HubServer ops endpoints", () => {
+  it("serves the export catalog and runs export/package/check against the bridge", async () => {
+    const { fakeEditor } = await import("../mcp/fakeEditor.testutil.js");
+    const editor = fakeEditor({ enet: { components: {} } });
+    const hub = new HubServer({ bridge: editor.bridge as never, token: TOKEN, role: "mcp", port: 0 });
+    await hub.start();
+    cleanups.push(() => hub.stop());
+    const post = (route: string, body: unknown) => fetch(`${hub.url}${route}`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify(body)
+    });
+
+    const catalog = await (await fetch(`${hub.url}/v1/exports`, { headers: { authorization: `Bearer ${TOKEN}` } })).json();
+    expect(catalog.result.supported.map((entry: { kind: string }) => entry.kind)).toContain("ibom");
+
+    const exported = await (await post("/v1/ops/export", { kind: "step" })).json();
+    expect(exported.result).toMatchObject({ kind: "step", fileName: "My_Board_v2-step.step", restoredDocument: true });
+    expect(Buffer.from(exported.result.base64, "base64").toString()).toContain("ISO-10303-21");
+
+    const unsupported = await post("/v1/ops/export", { kind: "ipc2581" });
+    expect(unsupported.status).toBe(400);
+    expect((await unsupported.json()).error.code).toBe("export_unsupported");
+
+    const pkg = await (await post("/v1/ops/package", { kinds: ["gerber", "pnp"] })).json();
+    expect(pkg.result.manifest.files).toHaveLength(2);
+    expect(pkg.result.files[0]).toMatchObject({ kind: "gerber", fileName: "My_Board_v2-gerber.zip" });
+
+    const check = await (await post("/v1/ops/check", {})).json();
+    expect(check.result).toMatchObject({ ok: true, findings: 0 });
+
+    const noAuth = await fetch(`${hub.url}/v1/ops/check`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+    expect(noAuth.status).toBe(401);
+  });
+});
+
 describe("EasyEdaBridge bye", () => {
   it("sends {kind:\"bye\"} to the extension before closing on stop()", async () => {
     const bridge = new EasyEdaBridge({ port: 0, logger: silentLogger });

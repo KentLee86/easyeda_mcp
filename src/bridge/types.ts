@@ -19,6 +19,11 @@ export interface BridgeClient {
   readonly endpoint: string;
   getStatus(): EditorStatus | Promise<EditorStatus>;
   call(method: string, params?: unknown, timeoutMs?: number): Promise<unknown>;
+  /**
+   * Resolve true as soon as the extension has said hello (at once if it already
+   * has), false after timeoutMs. Replaces status polling.
+   */
+  waitForConnected?(timeoutMs: number): Promise<boolean>;
   /** Optional diagnostics about how the bridge is wired (owner/proxy/...). */
   describe?(): Record<string, unknown>;
 }

@@ -1,3 +1,4 @@
+import { watch, type FSWatcher } from "node:fs";
 import { createDisconnectedStatus, type EditorStatus } from "../protocol/messages.js";
 import { SERVER_VERSION } from "../version.js";
 import { EasyEdaBridge } from "./EasyEdaBridge.js";
@@ -8,6 +9,7 @@ import type { BridgeClient, BridgeMode } from "./types.js";
 import {
   configDir as defaultConfigDir,
   DEFAULT_HTTP_PORT,
+  ensureConfigDir,
   ensureToken,
   envHttpPort,
   envWsPort,
@@ -55,6 +57,7 @@ export class BridgeHost implements BridgeClient {
   private mode: BridgeMode = "stopped";
   private waitingMessage?: string;
   private timer?: NodeJS.Timeout;
+  private watcher?: FSWatcher;
   private ticking?: Promise<void>;
   private readonly startedAt = new Date().toISOString();
 
@@ -105,13 +108,80 @@ export class BridgeHost implements BridgeClient {
     }
     this.mode = "waiting";
     await this.tick();
+    this.watchHubFile();
+    // Fallback for file systems without change events.
     this.timer = setInterval(() => {
       void this.tick();
     }, this.options.retryMs);
     this.timer.unref?.();
   }
 
+  /**
+   * The owner removes hub.json right before it releases the port, so a
+   * non-owner that sees hub.json disappear re-checks at once instead of
+   * waiting for the next interval tick.
+   */
+  private watchHubFile(): void {
+    ensureConfigDir(this.options.configDir).then(() => {
+      if (this.mode === "stopped" || this.watcher) {
+        return;
+      }
+      try {
+        this.watcher = watch(this.options.configDir, { persistent: false }, (_event, fileName) => {
+          if (this.mode === "owner" || this.mode === "stopped") {
+            return;
+          }
+          if (fileName === null || String(fileName) === "hub.json") {
+            this.burst();
+          }
+        });
+        this.watcher.on("error", () => this.unwatch());
+      } catch {
+        // No fs.watch here; the interval still covers takeover.
+      }
+    }, () => undefined);
+  }
+
+  /**
+   * hub.json goes away just before the owner releases the port, so retry a few
+   * times over the next second rather than once.
+   */
+  private burst(): void {
+    if (this.burstTimers.length > 0) {
+      return;
+    }
+    for (const delay of [0, 20, 50, 100, 200, 400, 700, 1_000]) {
+      const timer = setTimeout(() => {
+        this.burstTimers = this.burstTimers.filter((item) => item !== timer);
+        if (this.mode === "waiting" || this.mode === "proxy") {
+          void this.tick();
+        }
+      }, delay);
+      timer.unref?.();
+      this.burstTimers.push(timer);
+    }
+  }
+
+  private burstTimers: NodeJS.Timeout[] = [];
+
+  private unwatch(): void {
+    for (const timer of this.burstTimers) {
+      clearTimeout(timer);
+    }
+    this.burstTimers = [];
+    this.watcher?.close();
+    this.watcher = undefined;
+  }
+
+  async waitForConnected(timeoutMs: number): Promise<boolean> {
+    if (this.mode === "proxy" && this.remote) {
+      return this.remote.waitForConnected(timeoutMs).catch(() => false);
+    }
+    return this.local.waitForConnected(timeoutMs);
+  }
+
   async stop(): Promise<void> {
+    this.unwatch();
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = undefined;

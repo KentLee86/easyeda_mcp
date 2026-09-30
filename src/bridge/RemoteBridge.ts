@@ -46,6 +46,21 @@ export class RemoteBridge implements BridgeClient {
     return this.lastStatus;
   }
 
+  /**
+   * Long-poll the hub until the extension has said hello (or timeoutMs, capped
+   * by the hub at 60 s). Resolves with the status either way.
+   */
+  async waitForStatus(timeoutMs: number): Promise<EditorStatus> {
+    const wait = Math.max(0, Math.round(timeoutMs));
+    this.lastStatus = await this.request<EditorStatus>("GET", `/v1/status?waitFor=connected&timeoutMs=${wait}`, undefined, wait + this.httpSlackMs);
+    return this.lastStatus;
+  }
+
+  async waitForConnected(timeoutMs: number): Promise<boolean> {
+    const status = await this.waitForStatus(timeoutMs);
+    return status.connected && status.connectionState !== "connecting";
+  }
+
   /** Last status fetched by getStatus(), without a round trip. */
   get cachedStatus(): EditorStatus {
     return this.lastStatus;

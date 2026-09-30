@@ -36,6 +36,7 @@ export class EasyEdaBridge implements BridgeClient {
   private socket?: WebSocket;
   private readonly pending = new Map<string, PendingCall>();
   private status: EditorStatus = createDisconnectedStatus();
+  private readonly connectedWaiters = new Set<() => void>();
   private retryTimer?: NodeJS.Timeout;
 
   constructor(options: EasyEdaBridgeOptions = {}) {
@@ -234,6 +235,7 @@ export class EasyEdaBridge implements BridgeClient {
         updatedAt: new Date().toISOString()
       };
       this.ack();
+      this.notifyConnected();
       return;
     }
 
@@ -252,6 +254,7 @@ export class EasyEdaBridge implements BridgeClient {
         updatedAt: new Date().toISOString()
       };
       this.ack();
+      this.notifyConnected();
       return;
     }
 
@@ -274,6 +277,40 @@ export class EasyEdaBridge implements BridgeClient {
       clearTimeout(pending.timer);
       this.pending.delete(message.requestId);
       pending.reject(new BridgeRpcError(message.error.message, message.error.code, message.error.details));
+    }
+  }
+
+  /** True once the extension said hello (connected, or blocked by a protocol mismatch). */
+  isReady(): boolean {
+    return this.status.connected && (this.status.connectionState === "connected" || this.status.connectionState === "blocked");
+  }
+
+  /**
+   * Resolve true as soon as the extension has said hello (immediately if it
+   * already has), or false after timeoutMs.
+   */
+  waitForConnected(timeoutMs: number): Promise<boolean> {
+    if (this.isReady()) {
+      return Promise.resolve(true);
+    }
+    return new Promise<boolean>((resolve) => {
+      const done = (value: boolean) => {
+        clearTimeout(timer);
+        this.connectedWaiters.delete(onConnected);
+        resolve(value);
+      };
+      const onConnected = () => done(true);
+      const timer = setTimeout(() => done(false), Math.max(0, timeoutMs));
+      this.connectedWaiters.add(onConnected);
+    });
+  }
+
+  private notifyConnected(): void {
+    if (!this.isReady()) {
+      return;
+    }
+    for (const waiter of [...this.connectedWaiters]) {
+      waiter();
     }
   }
 

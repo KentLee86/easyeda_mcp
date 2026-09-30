@@ -80,6 +80,24 @@ describe("BridgeHost", () => {
     await expect(second.call("getContext")).resolves.toBe("new-owner");
   });
 
+  it("takes over within milliseconds when hub.json disappears, without waiting for the interval", async () => {
+    const dir = await tempConfigDir();
+    const make = async (port: number) => {
+      const host = new BridgeHost({ role: "mcp", wsPort: port, httpPort: 0, configDir: dir, retryMs: 60_000, logger: silentLogger });
+      await host.start();
+      cleanups.push(() => host.stop());
+      return host;
+    };
+    const owner = await make(0);
+    const second = await make(owner.wsPort);
+    expect(second.currentMode).toBe("proxy");
+    await new Promise((resolve) => setTimeout(resolve, 50)); // let the watcher attach
+    const started = Date.now();
+    await owner.stop();
+    await waitFor(() => second.currentMode === "owner", 2_000);
+    expect(Date.now() - started).toBeLessThan(1_500);
+  });
+
   it("waits (no proxy) when the port is held by something that is not a hub", async () => {
     const dir = await tempConfigDir();
     const blocker: Server = createServer();

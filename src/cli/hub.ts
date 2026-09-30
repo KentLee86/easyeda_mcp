@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { closeSync, openSync } from "node:fs";
+import { closeSync, openSync, watch, type FSWatcher } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { BridgeRpcError, BridgeUnavailableError } from "../bridge/errors.js";
 import { RemoteBridge } from "../bridge/RemoteBridge.js";
@@ -51,10 +51,6 @@ export async function spawnDaemon(dir = configDir()): Promise<number | undefined
   }
 }
 
-async function sleep(ms: number): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 /**
  * Connect to the hub, starting a daemon when allowed. With requireExtension,
  * wait until the extension is connected — but only while the hub is young
@@ -69,11 +65,7 @@ export async function connectHub(options: { start: boolean; requireExtension: bo
       throw new BridgeRpcError(`No easyeda-mcp hub is running (config dir ${dir}). Start one with \`easyeda daemon\`, run an MCP client, or drop --no-start.`, "hub_not_running");
     }
     const pid = await spawnDaemon(dir);
-    const deadline = Date.now() + waitMs;
-    while (!connection && Date.now() < deadline) {
-      await sleep(200);
-      connection = await findHub(dir);
-    }
+    connection = await waitForHub(dir, Date.now() + waitMs);
     if (!connection) {
       throw new BridgeRpcError(`Started a daemon (pid ${pid}) but its hub did not answer within ${waitMs / 1000}s. See ${daemonLogPath(dir)}.`, "hub_start_failed");
     }
@@ -84,14 +76,48 @@ export async function connectHub(options: { start: boolean; requireExtension: bo
   }
   const startedAt = Date.parse(String(connection.info.startedAt ?? ""));
   const deadline = connection.started ? Date.now() + waitMs : (Number.isFinite(startedAt) ? startedAt + waitMs : Date.now());
+  // Long-poll: the hub answers as soon as the extension says hello.
   for (;;) {
-    const status = await connection.bridge.getStatus();
+    const remaining = deadline - Date.now();
+    const status = remaining > 0 ? await connection.bridge.waitForStatus(remaining) : await connection.bridge.getStatus();
     if (status.connected && status.connectionState !== "connecting") {
       return connection;
     }
-    if (Date.now() >= deadline) {
+    if (Date.now() >= deadline - 10) {
       throw new BridgeUnavailableError(`${status.message ?? "EasyEDA Pro extension is not connected."} (hub ${connection.bridge.baseUrl})`);
     }
-    await sleep(250);
+  }
+}
+
+/**
+ * Wait for a freshly spawned daemon: react to hub.json appearing in the
+ * config dir (fs.watch), with a slow poll as fallback.
+ */
+async function waitForHub(dir: string, deadline: number): Promise<HubConnection | undefined> {
+  let watcher: FSWatcher | undefined;
+  let wake: (() => void) | undefined;
+  try {
+    watcher = watch(dir, { persistent: false }, () => wake?.());
+    watcher.on("error", () => undefined);
+  } catch {
+    watcher = undefined;
+  }
+  try {
+    for (;;) {
+      const connection = await findHub(dir);
+      if (connection || Date.now() >= deadline) {
+        return connection;
+      }
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, Math.min(watcher ? 500 : 100, Math.max(0, deadline - Date.now())));
+        wake = () => {
+          clearTimeout(timer);
+          resolve();
+        };
+      });
+      wake = undefined;
+    }
+  } finally {
+    watcher?.close();
   }
 }

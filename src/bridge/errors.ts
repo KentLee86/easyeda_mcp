@@ -62,8 +62,10 @@ export function errorToWire(error: unknown): { status: number; error: WireError 
     };
   }
   if (error instanceof BridgeRpcError) {
+    // Caller mistakes found before/while talking to the editor are 400s; anything else the extension reported is 502.
+    const clientError = ["invalid_argument", "export_unsupported", "component_not_found", "component_ambiguous"].includes(error.code ?? "");
     return {
-      status: 502,
+      status: clientError ? 400 : 502,
       error: { code: error.code ?? "easyeda_rpc_error", message: error.message, ...(error.details === undefined ? {} : { details: error.details }) }
     };
   }

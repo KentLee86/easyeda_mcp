@@ -4,10 +4,14 @@ import type { AddressInfo } from "node:net";
 import { errorToWire, type WireError } from "./errors.js";
 import type { BridgeClient } from "./types.js";
 import { HUB_HOST } from "./config.js";
+import { describeCatalog } from "../mcp/exportCatalog.js";
+import { collectPackage, exportKind, runDesignCheck } from "../mcp/exportOps.js";
 
 export const MAX_BODY_BYTES = 16 * 1024 * 1024;
 export const MAX_CALL_TIMEOUT_MS = 600_000;
 export const DEFAULT_CALL_TIMEOUT_MS = 10_000;
+/** Longest a GET /v1/status?waitFor=connected may hold the request. */
+export const MAX_STATUS_WAIT_MS = 60_000;
 
 export type HubRole = "mcp" | "daemon";
 
@@ -97,14 +101,29 @@ export class HubServer {
       const url = new URL(request.url ?? "/", "http://hub");
       const route = `${request.method} ${url.pathname}`;
       switch (route) {
-        case "GET /v1/status":
+        case "GET /v1/status": {
+          // Long-poll: ?waitFor=connected&timeoutMs=N answers as soon as the extension says hello.
+          if (url.searchParams.get("waitFor") === "connected" && this.options.bridge.waitForConnected) {
+            const requested = Number(url.searchParams.get("timeoutMs") ?? MAX_STATUS_WAIT_MS);
+            const waitMs = Number.isFinite(requested) ? Math.min(Math.max(requested, 0), MAX_STATUS_WAIT_MS) : MAX_STATUS_WAIT_MS;
+            await this.options.bridge.waitForConnected(waitMs);
+          }
           this.send(response, 200, await this.options.bridge.getStatus());
           return;
+        }
         case "GET /v1/hub":
           this.send(response, 200, { ok: true, role: this.options.role, httpPort: this.port, ...this.options.info?.() });
           return;
         case "POST /v1/call":
           await this.handleCall(request, response);
+          return;
+        case "GET /v1/exports":
+          this.send(response, 200, { ok: true, result: describeCatalog() });
+          return;
+        case "POST /v1/ops/export":
+        case "POST /v1/ops/package":
+        case "POST /v1/ops/check":
+          await this.handleOps(url.pathname.slice("/v1/ops/".length), request, response);
           return;
         case "POST /v1/shutdown":
           await readJsonBody(request);
@@ -115,7 +134,7 @@ export class HubServer {
           setImmediate(() => this.options.onShutdown?.());
           return;
         default:
-          if (["/v1/status", "/v1/hub", "/v1/call", "/v1/shutdown"].includes(url.pathname)) {
+          if (["/v1/status", "/v1/hub", "/v1/call", "/v1/shutdown", "/v1/exports", "/v1/ops/export", "/v1/ops/package", "/v1/ops/check"].includes(url.pathname)) {
             throw new HttpError(405, "method_not_allowed", `${request.method} is not allowed on ${url.pathname}.`);
           }
           throw new HttpError(404, "not_found", `Unknown endpoint ${url.pathname}.`);
@@ -168,6 +187,43 @@ export class HubServer {
       const result = await this.options.bridge.call(method, params, timeout);
       this.send(response, 200, { ok: true, result });
     } catch (error) {
+      const wire = errorToWire(error);
+      this.send(response, wire.status, { ok: false, error: wire.error });
+    }
+  }
+
+  /**
+   * High-level operations run in the hub process (so clients such as the
+   * Python one share the TypeScript catalog and logic). Files come back as
+   * base64; the client writes them.
+   */
+  private async handleOps(operation: string, request: IncomingMessage, response: ServerResponse): Promise<void> {
+    const body = await readJsonBody(request);
+    const input = (typeof body === "object" && body !== null && !Array.isArray(body) ? body : {}) as Record<string, unknown>;
+    const strings = (value: unknown) => (Array.isArray(value) ? value.map(String) : undefined);
+    const text = (value: unknown) => (typeof value === "string" ? value : undefined);
+    try {
+      let result: unknown;
+      if (operation === "export") {
+        if (typeof input.kind !== "string") {
+          throw new HttpError(400, "bad_request", "\"kind\" is required.");
+        }
+        const file = await exportKind(this.options.bridge, input.kind, {
+          format: text(input.format),
+          scope: text(input.scope) as "pcb" | "schematic" | undefined
+        });
+        result = { kind: file.kind, fileName: file.fileName, mimeType: file.mimeType, size: file.data.length, ms: file.ms, document: file.document, restoredDocument: file.restored, base64: file.data.toString("base64") };
+      } else if (operation === "package") {
+        const collected = await collectPackage(this.options.bridge, { kinds: strings(input.kinds), preset: text(input.preset) });
+        result = { manifest: collected.manifest, files: collected.files.map((file) => ({ kind: file.kind, fileName: file.fileName, size: file.data.length, base64: file.data.toString("base64") })) };
+      } else {
+        result = await runDesignCheck(this.options.bridge, { strict: input.strict === true });
+      }
+      this.send(response, 200, { ok: true, result });
+    } catch (error) {
+      if (error instanceof HttpError) {
+        throw error;
+      }
       const wire = errorToWire(error);
       this.send(response, wire.status, { ok: false, error: wire.error });
     }
