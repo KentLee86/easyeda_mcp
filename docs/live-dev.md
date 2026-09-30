@@ -60,6 +60,7 @@ Other helpers (run through `dev/live/node.sh node ...` unless noted):
 | `dev/live/ui.mjs "<text>" ... shot:<png>` | Click UI elements by visible text; take screenshots |
 | `dev/live/dump-raw.mjs > dev/live/.work/raw.json` | Dump the per-page schematic data the extension collects |
 | `node dev/live/compare-netlist.mjs <raw.json> <netlist.enet>` (host) | Compare the schematic analysis with EasyEDA Pro's own netlist export |
+| `dev/live/render-3d.mjs <dir>` | Open the 3D preview and save iso/top/bottom/front/left PNGs (no API exists for the 3D view, so views are switched through the UI) |
 | `dev/live/window.sh` (host) | Resize the window to 1920x1080 so extension header menus are not folded |
 
 ### Checking analysis against EasyEDA
