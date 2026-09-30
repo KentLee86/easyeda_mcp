@@ -227,17 +227,94 @@ export async function renderImage(params: Record<string, any>): Promise<Record<s
   }
   if (region && ["left", "right", "top", "bottom"].every((key) => typeof region[key] === "number")) {
     await fitView(region);
-    // The canvas redraws asynchronously after a view change.
-    await new Promise((done) => setTimeout(done, Number(params.settleMs ?? 300)));
+    // getCurrentRenderedAreaImage renders the new view itself: images taken 0 ms
+    // and 300 ms after zoomTo were byte-identical, so no settle wait by default.
+    const settleMs = Number(params.settleMs ?? 0);
+    if (settleMs > 0) {
+      await new Promise((done) => setTimeout(done, settleMs));
+    }
   }
   const image = await eda.dmt_EditorControl.getCurrentRenderedAreaImage();
   if (!image || typeof image.arrayBuffer !== "function") {
     throw codedError("render_failed", "EasyEDA Pro did not return an image.");
   }
-  const bytes = new Uint8Array(await image.arrayBuffer());
+  const encoded = await blobToBase64(image);
+  return { mimeType: image.type || "image/png", size: encoded.size, base64: encoded.base64, ...(region ? { region } : {}) };
+}
+
+async function blobToBase64(blob: Blob): Promise<{ size: number; base64: string }> {
+  const bytes = new Uint8Array(await blob.arrayBuffer());
   let binary = "";
   for (let index = 0; index < bytes.length; index += 0x8000) {
     binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
   }
-  return { mimeType: image.type || "image/png", size: bytes.length, base64: btoa(binary), ...(region ? { region } : {}) };
+  return { size: bytes.length, base64: btoa(binary) };
+}
+
+const DOCUMENT_KIND: Record<string, "pcb" | "schematic"> = { pcb_: "pcb", sch_: "schematic" };
+const PCB_TYPES = [3, 12, 15];
+const SCHEMATIC_TYPES = [1, 8, 9];
+
+function documentKind(info: any): "pcb" | "schematic" | "other" {
+  return PCB_TYPES.includes(info?.documentType) ? "pcb" : SCHEMATIC_TYPES.includes(info?.documentType) ? "schematic" : "other";
+}
+
+/**
+ * Any *_ManufactureData.get* export as file contents. The document must match the
+ * namespace: calling a PCB export on a schematic tab opens an error dialog and the
+ * promise never settles.
+ */
+export async function exportFile(params: Record<string, any>): Promise<Record<string, unknown>> {
+  const { namespace, method, target } = resolve(params.path);
+  if (!/_ManufactureData$/.test(namespace) || !method.startsWith("get")) {
+    throw codedError("api_forbidden", "exportFile only calls *_ManufactureData.get* methods.");
+  }
+  const wanted = DOCUMENT_KIND[namespace.slice(0, 4)];
+  if (wanted) {
+    const kind = documentKind(await eda.dmt_SelectControl.getCurrentDocumentInfo());
+    if (kind !== wanted) {
+      throw codedError("unsupported_document", `${namespace}.${method} needs the ${wanted} open (active: ${kind}); call useDocument first.`);
+    }
+  }
+  const args = Array.isArray(params.args) ? params.args : [];
+  const value = await target[method](...args);
+  const blob: Blob | undefined = value instanceof Blob ? value : value?.file instanceof Blob ? value.file : undefined;
+  if (!blob) {
+    throw codedError("export_empty", `EasyEDA Pro returned no file from ${namespace}.${method}.`, toPlain(value));
+  }
+  const encoded = await blobToBase64(blob);
+  return { fileName: params.fileName ?? (blob as File).name ?? method, mimeType: blob.type || undefined, size: encoded.size, base64: encoded.base64 };
+}
+
+/** Open the active board's PCB or a schematic page (or a document by uuid). */
+export async function useDocument(params: Record<string, any>): Promise<Record<string, unknown>> {
+  const before = await eda.dmt_SelectControl.getCurrentDocumentInfo();
+  const previous = before?.uuid ? { uuid: before.uuid, documentType: before.documentType } : null;
+  let uuid: string | undefined = typeof params.uuid === "string" ? params.uuid : undefined;
+  let name: string | undefined;
+  if (!uuid) {
+    const project = await eda.dmt_Project.getCurrentProjectInfo();
+    const boards: any[] = Array.isArray(project?.data) ? project.data : [];
+    const board = boards.find((item) => item?.pcb?.uuid === before?.uuid
+      || (item?.schematic?.page ?? []).some((page: any) => page?.uuid === before?.uuid)) ?? boards[0];
+    if (!board) {
+      throw codedError("no_project", "No project is open in EasyEDA Pro.");
+    }
+    if (params.kind === "pcb") {
+      if (!board.pcb?.uuid) throw codedError("no_pcb", `Board ${board.name ?? ""} has no PCB.`);
+      uuid = board.pcb.uuid;
+      name = board.pcb.name;
+    } else {
+      const pages: any[] = board.schematic?.page ?? [];
+      const page = params.page ? pages.find((item) => item.uuid === params.page || item.name === params.page) : pages[0];
+      if (!page) throw codedError("no_schematic", `Schematic page ${params.page ?? ""} not found.`);
+      uuid = page.uuid;
+      name = page.name;
+    }
+  }
+  if (before?.uuid !== uuid) {
+    await eda.dmt_EditorControl.openDocument(uuid);
+  }
+  const after = await eda.dmt_SelectControl.getCurrentDocumentInfo();
+  return { previous, current: { uuid: after?.uuid, documentType: after?.documentType, ...(name ? { name } : {}) } };
 }

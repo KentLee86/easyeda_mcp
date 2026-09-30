@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { apiBatch, apiCall, apiDescribe, pcbDrc, pcbSnapshot, renderImage, toPlain } from "./api.js";
+import { apiBatch, apiCall, apiDescribe, exportFile, pcbDrc, pcbSnapshot, renderImage, toPlain, useDocument } from "./api.js";
 
 class Primitive {
   readonly #state: { id: string; x: number };
@@ -145,5 +145,56 @@ describe("renderImage", () => {
     expect(scale).toBeCloseTo(700 / 20.2, 6);
     expect(result).toMatchObject({ mimeType: "image/png", size: 4, base64: "iVBORw==" });
     vi.useRealTimers();
+  });
+});
+
+describe("exportFile", () => {
+  const withManufacture = (documentType: number, file: unknown) => {
+    const pcbGet = vi.fn(async () => file);
+    vi.stubGlobal("eda", {
+      ...makeEda(documentType),
+      pcb_ManufactureData: { get3DFile: pcbGet },
+      sch_ManufactureData: { getExportDocumentFile: vi.fn(async () => file) }
+    });
+    return pcbGet;
+  };
+
+  it("returns the file of a *_ManufactureData.get* call as base64", async () => {
+    const get3DFile = withManufacture(3, new File(["STEP"], "board.step", { type: "text/plain" }));
+    await expect(exportFile({ path: "pcb_ManufactureData.get3DFile", args: ["board", "step"] }))
+      .resolves.toEqual({ fileName: "board.step", mimeType: "text/plain", size: 4, base64: "U1RFUA==" });
+    expect(get3DFile).toHaveBeenCalledWith("board", "step");
+  });
+
+  it("refuses a PCB export on a schematic tab (it would hang behind a dialog)", async () => {
+    const get3DFile = withManufacture(1, new File(["x"], "x"));
+    await expect(exportFile({ path: "pcb_ManufactureData.get3DFile" })).rejects.toMatchObject({ code: "unsupported_document" });
+    expect(get3DFile).not.toHaveBeenCalled();
+  });
+
+  it("reports an empty export and only allows manufacture getters", async () => {
+    withManufacture(3, undefined);
+    await expect(exportFile({ path: "pcb_ManufactureData.get3DFile" })).rejects.toMatchObject({ code: "export_empty" });
+    await expect(exportFile({ path: "pcb_PrimitiveComponent.getAll" })).rejects.toMatchObject({ code: "api_forbidden" });
+  });
+});
+
+describe("useDocument", () => {
+  it("opens the board's PCB or first schematic page and reports the previous document", async () => {
+    let current = { uuid: "page-1", documentType: 1 };
+    const openDocument = vi.fn(async (uuid: string) => { current = { uuid, documentType: uuid === "pcb-1" ? 3 : 1 }; });
+    vi.stubGlobal("eda", {
+      dmt_SelectControl: { getCurrentDocumentInfo: async () => current },
+      dmt_EditorControl: { openDocument },
+      dmt_Project: { getCurrentProjectInfo: async () => ({ data: [{ name: "B", pcb: { uuid: "pcb-1", name: "PCB" }, schematic: { page: [{ uuid: "page-1", name: "P1" }, { uuid: "page-2", name: "P2" }] } }] }) }
+    });
+
+    await expect(useDocument({ kind: "pcb" })).resolves.toEqual({
+      previous: { uuid: "page-1", documentType: 1 },
+      current: { uuid: "pcb-1", documentType: 3, name: "PCB" }
+    });
+    await expect(useDocument({ kind: "schematic", page: "P2" })).resolves.toMatchObject({ current: { uuid: "page-2" } });
+    await useDocument({ uuid: "page-2" });
+    expect(openDocument).toHaveBeenCalledTimes(2);
   });
 });

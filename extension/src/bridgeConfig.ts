@@ -16,10 +16,13 @@ type BridgeConfigOverride = Partial<ExtensionBridgeConfig>;
 const defaultBridgeConfig: ExtensionBridgeConfig = {
   host: "127.0.0.1",
   port: 8765,
-  openTimeoutMs: 2_500,
-  heartbeatIntervalMs: 5_000,
-  livenessTimeoutMs: 15_000,
-  reconnectDelayMs: [0, 1_000, 2_500, 5_000],
+  // Localhost opens take milliseconds, and sys_WebSocket reports no failure
+  // event, so a short open timeout and a ~1 s retry cadence are the fastest way
+  // to find a server that starts later (about two cheap attempts per second).
+  openTimeoutMs: 1_000,
+  heartbeatIntervalMs: 3_000,
+  livenessTimeoutMs: 10_000,
+  reconnectDelayMs: [0, 250, 500, 1_000],
   stateKey: ""
 };
 

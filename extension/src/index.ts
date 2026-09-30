@@ -18,7 +18,7 @@ import {
 } from "../../src/protocol/messages.js";
 import { getBridgeConfig, getBridgeUri } from "./bridgeConfig.js";
 import { EXTENSION_VERSION } from "../../src/version.js";
-import { apiBatch, apiCall, apiDescribe, pcbDrc, pcbSnapshot, renderImage } from "./api.js";
+import { apiBatch, apiCall, apiDescribe, exportFile, pcbDrc, pcbSnapshot, renderImage, useDocument } from "./api.js";
 
 type EasyEdaApi = Record<string, any>;
 
@@ -122,7 +122,9 @@ const handlers: Record<string, (params: Record<string, any>) => Promise<unknown>
   apiDescribe,
   pcbSnapshot,
   pcbDrc,
-  renderImage
+  renderImage,
+  exportFile,
+  useDocument
 };
 
 export function activate(status?: string, arg?: string): void {
@@ -284,7 +286,8 @@ async function handleMessage(raw: string): Promise<void> {
     // The server is shutting down; a new one usually follows within seconds.
     connectionState.lostSinceLastOpen = true;
     closeSocket();
-    connectionState.attemptIndex = 0;
+    // Next attempt uses delays[attemptIndex + 1]; -1 selects delays[0] (no wait).
+    connectionState.attemptIndex = -1;
     handleConnectionFailure(normalizeError(apiError("bridge_closed", "The MCP server closed the bridge.")), {
       manual: false,
       shouldRetry: true
