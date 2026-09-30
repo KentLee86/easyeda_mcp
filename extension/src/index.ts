@@ -67,6 +67,8 @@ type ConnectionState = {
   connectedOnce: boolean;
   /** Set when the connection dropped, so the next successful open is announced. */
   lostSinceLastOpen: boolean;
+  /** Build of the code whose timers/handlers own the connection. */
+  codeFingerprint?: string;
   /** Short-timeout attempts left after a server "bye" (successor starting up). */
   fastRetries: number;
   /** The permission dialog was shown for the current blocked episode. */
@@ -139,8 +141,44 @@ export function activate(status?: string, arg?: string): void {
     deactivate();
     return;
   }
+  takeOverFromOlderCode();
   connectionState.disposed = false;
   void ensureBridgeConnected({ reason: "activation", manual: false });
+}
+
+/**
+ * Reinstalling or updating the extension does not stop the code that is already
+ * running in the editor: its timers keep reconnecting and its message handler
+ * keeps answering calls. The shared state records whose code owns the
+ * connection; when a newer build activates, clear the old timers and socket so
+ * the new handlers take over (without a restart of EasyEDA Pro).
+ */
+function takeOverFromOlderCode(): void {
+  const fingerprint = codeFingerprint();
+  // Builds before this field existed leave it undefined; treat them as older code.
+  if (connectionState.codeFingerprint !== fingerprint) {
+    log("warn", "Newer EasyEDA MCP Bridge code activated; taking over the connection.");
+    resetConnectionTimers();
+    closeSocket();
+    connectionState.phase = "idle";
+    connectionState.attemptIndex = 0;
+  }
+  connectionState.codeFingerprint = fingerprint;
+}
+
+let cachedFingerprint: string | undefined;
+
+/** Hash of the handler sources: differs between builds, stable within one. */
+function codeFingerprint(): string {
+  if (!cachedFingerprint) {
+    const source = EXTENSION_VERSION + Object.entries(handlers).map(([name, fn]) => name + String(fn)).join("") + String(startBridge) + String(handleMessage);
+    let hash = 5381;
+    for (let index = 0; index < source.length; index += 1) {
+      hash = ((hash << 5) + hash + source.charCodeAt(index)) | 0;
+    }
+    cachedFingerprint = (hash >>> 0).toString(16);
+  }
+  return cachedFingerprint;
 }
 
 /** Stop retrying and close the socket (extension unload or dev hot-reload). */
@@ -152,11 +190,13 @@ export function deactivate(): void {
 }
 
 export function connect(): void {
+  takeOverFromOlderCode();
   connectionState.disposed = false;
   void ensureBridgeConnected({ reason: "manual-connect", manual: true, resetAttempts: true });
 }
 
 export function reconnect(): void {
+  takeOverFromOlderCode();
   connectionState.disposed = false;
   resetConnectionTimers();
   closeSocket();

@@ -130,6 +130,38 @@ describe("re-evaluated script (EasyEDA runs the entry again for every event)", (
   });
 });
 
+describe("upgrade without restarting EasyEDA Pro", () => {
+  it("a newer build's activate takes the connection over from the running older code", async () => {
+    const harness = makeEda();
+    const old = await loadExtension();
+    old.activate("onStartupFinished");
+    await harness.registration.onOpen?.();
+    // Pretend the running instance is an older build.
+    (globalThis as any).easyedaMcpBridgeRuntime.state.codeFingerprint = "older-build";
+    const closesBefore = harness.eda.sys_WebSocket.close.mock.calls.length;
+
+    vi.resetModules();
+    const newer = await loadExtension();
+    newer.activate("onChangeAllowExternalInteractions", "on");
+
+    expect(harness.eda.sys_WebSocket.close.mock.calls.length).toBeGreaterThan(closesBefore);
+    expect(harness.registerCount()).toBe(2);
+  });
+
+  it("the same build activating again keeps its live connection", async () => {
+    const harness = makeEda();
+    const first = await loadExtension();
+    first.activate("onStartupFinished");
+    await harness.registration.onOpen?.();
+
+    vi.resetModules();
+    const again = await loadExtension();
+    again.activate("onChangeAllowExternalInteractions", "on");
+
+    expect(harness.registerCount()).toBe(1);
+  });
+});
+
 describe("server bye", () => {
   it("probes quickly for the successor server before falling back to the normal cadence", async () => {
     const harness = makeEda();
