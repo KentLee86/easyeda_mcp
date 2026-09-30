@@ -149,6 +149,23 @@ describe("EasyEdaBridge", () => {
   });
 });
 
+describe("EasyEdaBridge extension silence", () => {
+  it("drops an extension connection that stops sending messages", async () => {
+    const logger = { error: () => undefined, warn: () => undefined, info: () => undefined };
+    const bridge = new EasyEdaBridge({ host: "127.0.0.1", port: 0, logger, extensionSilenceMs: 150 });
+    bridges.push(bridge);
+    await bridge.start();
+    const client = await connectClient(bridge.endpoint);
+    client.send(JSON.stringify({ kind: "hello", client: "easyeda-pro-extension", version: "0.2.0", protocolVersion: "0.2.0", capabilities: {} }));
+    await wait(50);
+    expect(bridge.getStatus().connected).toBe(true);
+
+    await wait(400);
+    expect(bridge.getStatus().connected).toBe(false);
+    await expect(bridge.call("getContext")).rejects.toBeInstanceOf(BridgeUnavailableError);
+  });
+});
+
 describe("EasyEdaBridge liveness and port sharing", () => {
   it("acks hello and status messages so the extension can detect a dead server", async () => {
     const bridge = await startBridge();

@@ -25,6 +25,13 @@ export type EasyEdaBridgeOptions = {
   logger?: Pick<Console, "error" | "warn" | "info">;
   /** How often to retry listening when the port is taken (default 5000 ms). */
   portRetryMs?: number;
+  /**
+   * Drop the extension connection after this long without any message (default
+   * 30000 ms; the extension sends a status heartbeat every few seconds). An
+   * extension that was uninstalled or lost its permission can leave the socket
+   * open without answering, which otherwise looks connected forever.
+   */
+  extensionSilenceMs?: number;
 };
 
 export class EasyEdaBridge implements BridgeClient {
@@ -32,6 +39,7 @@ export class EasyEdaBridge implements BridgeClient {
   private readonly port: number;
   private readonly logger: Pick<Console, "error" | "warn" | "info">;
   private readonly portRetryMs: number;
+  private readonly extensionSilenceMs: number;
   private wss?: WebSocketServer;
   private socket?: WebSocket;
   private readonly pending = new Map<string, PendingCall>();
@@ -44,6 +52,7 @@ export class EasyEdaBridge implements BridgeClient {
     this.port = options.port ?? Number(process.env.EASYEDA_MCP_WS_PORT ?? 8765);
     this.logger = options.logger ?? console;
     this.portRetryMs = options.portRetryMs ?? 5_000;
+    this.extensionSilenceMs = options.extensionSilenceMs ?? Number(process.env.EASYEDA_MCP_EXTENSION_SILENCE_MS ?? 30_000);
   }
 
   get endpoint(): string {
@@ -192,6 +201,14 @@ export class EasyEdaBridge implements BridgeClient {
     }
 
     this.socket = socket;
+    let lastMessageAt = Date.now();
+    const silenceCheck = setInterval(() => {
+      if (Date.now() - lastMessageAt > this.extensionSilenceMs) {
+        this.logger.error(`[easyeda-mcp] No message from the EasyEDA Pro extension for ${Math.round(this.extensionSilenceMs / 1000)}s; dropping the connection.`);
+        socket.terminate();
+      }
+    }, Math.min(2_000, Math.max(50, Math.floor(this.extensionSilenceMs / 4))));
+    silenceCheck.unref?.();
     this.status = {
       connected: true,
       connectionState: "connecting",
@@ -201,6 +218,7 @@ export class EasyEdaBridge implements BridgeClient {
     this.logger.error("[easyeda-mcp] EasyEDA Pro extension connected");
 
     socket.on("message", (data) => {
+      lastMessageAt = Date.now();
       try {
         this.handleMessage(parseClientMessage(data.toString()));
       } catch (error) {
@@ -209,6 +227,7 @@ export class EasyEdaBridge implements BridgeClient {
     });
 
     socket.on("close", () => {
+      clearInterval(silenceCheck);
       if (this.socket === socket) {
         this.socket = undefined;
         this.status = createDisconnectedStatus("EasyEDA Pro extension disconnected. Keep the extension open or reopen EasyEDA Pro.");
