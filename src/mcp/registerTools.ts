@@ -4,6 +4,7 @@ import { ok, fail } from "./toolResult.js";
 import { isExportedFile, writeExport, type ExportKind } from "./exportFiles.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { PROTOCOL_VERSION, type EditorStatus } from "../protocol/messages.js";
+import { SERVER_VERSION } from "../version.js";
 
 const DefaultTimeoutSchema = z.number().int().positive().max(120_000).default(10_000);
 const EndpointRefSchema = z.union([
@@ -167,7 +168,7 @@ export function registerEasyEdaTools(server: McpServer, bridge: EasyEdaBridge): 
         doctor: {
           server: {
             name: "easyeda-pro-mcp",
-            version: "0.1.0",
+            version: SERVER_VERSION,
             protocolVersion: PROTOCOL_VERSION
           },
           bridge: {

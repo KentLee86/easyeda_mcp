@@ -42,6 +42,11 @@ describe("EasyEDA extension bridge handlers", () => {
 
   beforeEach(() => {
     vi.useFakeTimers();
+    for (const key of Object.keys(globalThis)) {
+      if (key.startsWith("easyedaMcpBridgeRuntime")) {
+        delete (globalThis as Record<string, unknown>)[key];
+      }
+    }
     sentMessages = [];
     registration = {};
     dialogMessages = [];

@@ -7,6 +7,8 @@ export type ExtensionBridgeConfig = {
   livenessTimeoutMs: number;
   /** Backoff for the first attempts; afterwards the last delay repeats forever. */
   reconnectDelayMs: number[];
+  /** Suffix of the global that holds connection state (dev hot-load uses its own). */
+  stateKey: string;
 };
 
 type BridgeConfigOverride = Partial<ExtensionBridgeConfig>;
@@ -17,7 +19,8 @@ const defaultBridgeConfig: ExtensionBridgeConfig = {
   openTimeoutMs: 2_500,
   heartbeatIntervalMs: 5_000,
   livenessTimeoutMs: 15_000,
-  reconnectDelayMs: [0, 1_000, 2_500, 5_000]
+  reconnectDelayMs: [0, 1_000, 2_500, 5_000],
+  stateKey: ""
 };
 
 function resolveOverrides(): BridgeConfigOverride {

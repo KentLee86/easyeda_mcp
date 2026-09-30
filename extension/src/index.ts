@@ -17,6 +17,7 @@ import {
   type ProtocolCompatibility
 } from "../../src/protocol/messages.js";
 import { getBridgeConfig, getBridgeUri } from "./bridgeConfig.js";
+import { EXTENSION_VERSION } from "../../src/version.js";
 
 type EasyEdaApi = Record<string, any>;
 
@@ -45,7 +46,6 @@ type BridgeErrorMessage = {
 };
 
 const WS_ID = "easyeda-mcp-bridge";
-const EXTENSION_VERSION = "0.2.0";
 const bridgeConfig = getBridgeConfig();
 
 type ConnectionPhase = "idle" | "connecting" | "connected" | "blocked";
@@ -63,6 +63,8 @@ type ConnectionState = {
   connectedOnce: boolean;
   /** Set when the connection dropped, so the next successful open is announced. */
   lostSinceLastOpen: boolean;
+  /** The permission dialog was shown for the current blocked episode. */
+  blockedNotified: boolean;
   disposed: boolean;
   compatibility: ProtocolCompatibility;
   reconnectTimer?: ReturnType<typeof setTimeout>;
@@ -70,14 +72,22 @@ type ConnectionState = {
   heartbeatTimer?: ReturnType<typeof setInterval>;
 };
 
-const connectionState: ConnectionState = {
-  phase: "idle",
-  attemptIndex: 0,
-  connectedOnce: false,
-  lostSinceLastOpen: false,
-  disposed: false,
-  compatibility: evaluateProtocolCompatibility(PROTOCOL_VERSION)
-};
+// EasyEDA Pro re-evaluates the whole extension script for every activation event
+// and menu command, so module variables do not survive between calls. Connection
+// state (and its timers) lives on a page global shared by those evaluations.
+const runtimeGlobal = globalThis as unknown as Record<string, { state: ConnectionState } | undefined>;
+const runtimeKey = `easyedaMcpBridgeRuntime${bridgeConfig.stateKey}`;
+const connectionState: ConnectionState = (runtimeGlobal[runtimeKey] ??= {
+  state: {
+    phase: "idle",
+    attemptIndex: 0,
+    connectedOnce: false,
+    lostSinceLastOpen: false,
+    blockedNotified: false,
+    disposed: false,
+    compatibility: evaluateProtocolCompatibility(PROTOCOL_VERSION)
+  }
+}).state;
 
 const handlers: Record<string, (params: Record<string, any>) => Promise<unknown> | unknown> = {
   getContext,
@@ -108,8 +118,12 @@ const handlers: Record<string, (params: Record<string, any>) => Promise<unknown>
   confirmedAction
 };
 
-export function activate(status?: "onStartupFinished", arg?: string): void {
+export function activate(status?: string, arg?: string): void {
   log("warn", `EasyEDA MCP Bridge activated: ${status ?? "manual"} ${arg ?? ""}`);
+  if (status === "onChangeAllowExternalInteractions" && arg === "off") {
+    deactivate();
+    return;
+  }
   connectionState.disposed = false;
   void ensureBridgeConnected({ reason: "activation", manual: false });
 }
@@ -167,7 +181,13 @@ async function ensureBridgeConnected(options: { reason: string; manual: boolean;
 }
 
 async function startBridge(options: { reason: string; manual: boolean }): Promise<void> {
-  ensureApi("sys_WebSocket", "register");
+  if (!eda.sys_WebSocket?.register) {
+    handleConnectionFailure(normalizeError(apiError("api_unavailable", "EasyEDA Pro API eda.sys_WebSocket.register is unavailable; enable external interaction for this extension.")), {
+      manual: options.manual,
+      shouldRetry: true
+    });
+    return;
+  }
   resetConnectionTimers();
   // sys_WebSocket.register reuses an OPEN/CONNECTING socket with the same id and
   // never reports close, so a stale socket must be closed before retrying.
@@ -193,6 +213,10 @@ async function startBridge(options: { reason: string; manual: boolean }): Promis
         await handleMessage(event.data);
       },
       async () => {
+        if (connectionState.disposed) {
+          closeSocket();
+          return;
+        }
         const announce = !connectionState.connectedOnce || options.manual || connectionState.lostSinceLastOpen;
         connectionState.phase = "connected";
         connectionState.lastOpenAt = new Date().toISOString();
@@ -203,6 +227,7 @@ async function startBridge(options: { reason: string; manual: boolean }): Promis
         connectionState.attemptIndex = 0;
         connectionState.connectedOnce = true;
         connectionState.lostSinceLastOpen = false;
+        connectionState.blockedNotified = false;
         clearOpenTimeout();
         send({
           kind: "hello",
@@ -264,11 +289,15 @@ async function handleMessage(raw: string): Promise<void> {
       result
     });
   } catch (error) {
-    send({
-      kind: "error",
-      requestId: message.requestId,
-      error: normalizeError(error)
-    });
+    try {
+      send({
+        kind: "error",
+        requestId: message.requestId,
+        error: normalizeError(error)
+      });
+    } catch {
+      // The socket is gone; send() already scheduled a reconnect.
+    }
   }
 }
 
@@ -375,8 +404,10 @@ function handleConnectionFailure(
   connectionState.phase = isPermissionLikeError(error) ? "blocked" : "idle";
 
   // Keep retrying (the MCP server may start later or restart); after the initial
-  // backoff the last delay repeats. A missing permission will not fix itself.
-  const retry = options.shouldRetry && !connectionState.disposed && connectionState.phase !== "blocked";
+  // backoff the last delay repeats. This includes a missing external-interaction
+  // permission: right after install it is off, and enabling it should connect
+  // without a menu click.
+  const retry = options.shouldRetry && !connectionState.disposed;
   if (retry && !connectionState.reconnectTimer) {
     const delays = bridgeConfig.reconnectDelayMs;
     const nextAttempt = connectionState.attemptIndex + 1;
@@ -391,7 +422,11 @@ function handleConnectionFailure(
     }, delayMs);
   }
 
-  if (options.manual || connectionState.phase === "blocked") {
+  const firstBlock = connectionState.phase === "blocked" && !connectionState.blockedNotified;
+  if (connectionState.phase === "blocked") {
+    connectionState.blockedNotified = true;
+  }
+  if (options.manual || firstBlock) {
     showMessage("EasyEDA MCP Bridge", [
       error.message,
       "",
@@ -749,11 +784,9 @@ async function exportGerber(params: Record<string, any>): Promise<Record<string,
 
 async function exportPdf(params: Record<string, any>): Promise<Record<string, unknown>> {
   const fileName = params.fileName ?? `easyeda-export-${timestamp()}`;
-  const schematicActive = inferDocumentType(await optionalCall(() => eda.dmt_SelectControl.getCurrentDocumentInfo())) === "schematic";
-  const useSchematic = params.scope === "schematic"
-    || (params.scope !== "pcb" && schematicActive && eda.sch_ManufactureData?.getExportDocumentFile)
-    || (!eda.pcb_ManufactureData?.getPdfFile && eda.sch_ManufactureData?.getExportDocumentFile);
-  if (useSchematic) {
+  const api = await pickManufactureApi(params.scope, params.scope === "schematic" ? "getExportDocumentFile" : undefined);
+  if (api === eda.sch_ManufactureData) {
+    ensureApi("sch_ManufactureData", "getExportDocumentFile");
     const file = await eda.sch_ManufactureData.getExportDocumentFile(fileName, "PDF");
     return fileContents(file, `${fileName}.pdf`);
   }
@@ -834,6 +867,7 @@ async function collectSchematicSnapshot(options: { includeRaw: boolean; allPages
   // Pins, wires and texts are only readable on the open page, so visit each page
   // and restore the document the user was looking at.
   const original = await optionalCall(() => eda.dmt_SelectControl.getCurrentDocumentInfo());
+  // Home/blank tabs have no uuid to reopen; the last visited page then stays open.
   const originalUuid = pickString(original, ["uuid"]);
   const rawPages: RawSchematicPage[] = [];
   let current = originalUuid;
@@ -908,18 +942,18 @@ async function zoomToRegion(left: number, right: number, top: number, bottom: nu
   await eda.dmt_EditorControl.zoomToRegion(left, right, top, bottom);
 }
 
-async function pickManufactureApi(scope: string | undefined, method: string): Promise<any> {
+async function pickManufactureApi(scope: string | undefined, method?: string): Promise<any> {
   // The PCB API on a schematic tab (or vice versa) opens an error dialog and never
   // resolves, so "auto" follows the active document.
   const target = scope === "schematic" || scope === "pcb"
     ? scope
     : inferDocumentType(await optionalCall(() => eda.dmt_SelectControl.getCurrentDocumentInfo()));
   if (target === "schematic") {
-    ensureApi("sch_ManufactureData", method);
+    if (method) ensureApi("sch_ManufactureData", method);
     return eda.sch_ManufactureData;
   }
   if (target === "pcb") {
-    ensureApi("pcb_ManufactureData", method);
+    if (method) ensureApi("pcb_ManufactureData", method);
     return eda.pcb_ManufactureData;
   }
   throw apiError("unsupported_document", `Open a schematic page or PCB first (active document: ${target}), or pass scope.`);
@@ -1095,9 +1129,10 @@ function inferDocumentType(documentInfo: unknown): string {
     return DOCUMENT_TYPES[numericType] ?? "unknown";
   }
 
-  const raw = JSON.stringify(documentInfo ?? {}).toLowerCase();
+  // Only look at type-like fields: document names may contain "PCB" or "SCH".
+  const raw = [record?.documentType, record?.doctype, record?.type].filter((value) => typeof value === "string").join(" ").toLowerCase();
   if (raw.includes("pcb")) return "pcb";
-  if (raw.includes("sch") || raw.includes("schematic")) return "schematic";
+  if (raw.includes("sch")) return "schematic";
   if (raw.includes("footprint")) return "footprint";
   if (raw.includes("symbol")) return "symbol";
   return "unknown";
