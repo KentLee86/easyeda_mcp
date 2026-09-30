@@ -118,6 +118,19 @@ Activation is stored in the `easyeda-mcp-live-home` volume, so it happens once.
 
 ## Release Check with the Real Package
 
+Bump the extension version first (see [Updating the Extension](./easyeda-extension.md#updating-the-extension)); EasyEDA Pro keeps running the cached code of an already installed version. The most reliable check is a fresh profile, which is also what a new user has:
+
+```bash
+docker rm -f easyeda-mcp-live && docker volume rm easyeda-mcp-live-home
+EASYEDA_PRO_ACTIVATION_FILE=... dev/live/pro-up.sh && dev/live/node.sh node dev/live/setup.mjs   # ~30 s, activates again
+dev/live/install-eext.sh --allow-external     # connects within seconds
+docker restart easyeda-mcp-live               # then restart sidecars: they share its network namespace
+```
+
+The daemon and other sidecars join the Pro container's network namespace, so restart them after restarting Pro.
+
+### Checklist
+
 Injection skips the parts only an installed extension exercises: `sys_WebSocket`, the external-interaction permission, header menus and startup activation. Before a release, install the package once:
 
 ```bash

@@ -108,6 +108,7 @@ easyeda pcb drc
 easyeda export step                         # or gerber, pnp, bom, ibom, odb, ... (easyeda export --list)
 easyeda package --preset fab --zip          # folder + manifest.json for the fab house
 easyeda check                               # DRC + schematic vs PCB netlist, CI exit codes
+easyeda pcb analyze --top 5                 # placement density, overlaps, spacing, net lengths, open nets
 ```
 
 `easyeda` talks to a local hub (HTTP on `127.0.0.1:8766`, bearer token in `~/.config/easyeda-mcp/token`) served by the running MCP server or a background daemon it starts on demand. Several MCP servers can share one extension connection. See [CLI, HTTP hub, and Python client](./docs/cli.md) for commands, the HTTP API, the Python client in `clients/python/`, and the security model.
@@ -127,7 +128,7 @@ npm run docs:build
 
 `npm run setup:local` builds the MCP server, builds the EasyEDA Pro extension bundle, and packages the `.eext` artifact.
 
-Server and extension must use the same bridge protocol (currently `0.2.0`; npm package `1.1.0`, extension `0.2.0`). After updating, rebuild and reinstall both.
+Server and extension must use the same bridge protocol (currently `0.2.0`; npm package `1.1.0`, extension `0.3.0`). After updating, rebuild and reinstall both, then restart EasyEDA Pro.
 
 For live testing against a real editor, see [Live development with EasyEDA Pro in Docker](./docs/live-dev.md).
 

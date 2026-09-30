@@ -58,10 +58,18 @@ If this permission is off, the MCP client may show tools, but live editor calls 
 The server and extension must speak the same bridge protocol. Current versions:
 
 - npm package: `1.1.0`
-- extension: `0.2.0`
+- extension: `0.3.0`
 - bridge protocol: `0.2.0`
 
-After updating, rebuild with `npm run setup:local`, reinstall the `.eext`, and restart the MCP client.
+After updating, rebuild with `npm run setup:local`, reinstall the `.eext`, restart EasyEDA Pro and the MCP client.
+
+## Updating the Extension
+
+EasyEDA Pro 3.2 caches an installed extension by its uuid and version and does not stop code that is already running:
+
+- **Always bump the version** in `extension/extension.json` (and `src/version.ts`) for a new build. Re-importing the same version keeps the old code, even after an uninstall and a restart.
+- **Restart EasyEDA Pro after installing or updating.** Uninstalling or re-importing while the editor is open can leave the previous build running and connected; after a restart only the installed build runs and it connects on startup.
+- If the old build keeps the connection until then, the MCP server still works with it; tools added in the new build report `unknown_method` until the restart.
 
 ## Verify
 

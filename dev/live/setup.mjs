@@ -19,7 +19,12 @@ if (state === "activation") {
   await page.eval(`Array.from(document.querySelectorAll('a, button, span, div'))
     .find(e => e.children.length == 0 && e.textContent.trim() == 'Activate' && e.offsetParent).click(); 1`);
   // The client reloads into the Start Page; wait for the activation form to go.
-  await page.waitFor("!document.querySelector('.upload-input')", 30_000).catch(() => undefined);
+  // The client reloads into the Start Page: the old page's socket closes, or the
+  // activation form disappears, whichever comes first.
+  await Promise.race([
+    new Promise((resolve) => page.ws.once("close", resolve)),
+    page.waitFor("!document.querySelector('.upload-input')", 30_000).catch(() => undefined)
+  ]);
   page.close();
   const next = await Page.open();
   await next.waitFor("!!(window._EXTAPI_ROOT_ && document.querySelector('[class*=client_start_project]'))", 180_000);
