@@ -14,4 +14,15 @@ sleep 1
 # PID 1's child we wait on; keep the container alive independently.
 /opt/apps/easyeda-pro/easyeda-pro --no-sandbox --disable-gpu --gtk-version=3 \
     --remote-debugging-port="$cdp_port" >/tmp/easyeda-pro.log 2>&1 &
+# Fill the virtual screen once the main window exists: larger canvas renders, and
+# extension header menus are not folded into the overflow button.
+# The first window is a short-lived loader, so keep resizing during startup.
+(
+    for _ in $(seq 1 30); do
+        for w in $(xdotool search --onlyvisible --name "JLCEDA Pro|EasyEDA Pro" 2>/dev/null); do
+            xdotool getwindowgeometry "$w" | grep -q "1920x1080" || xdotool windowmove "$w" 0 0 windowsize "$w" 1920 1080
+        done
+        sleep 3
+    done
+) >/dev/null 2>&1 &
 exec sleep infinity
