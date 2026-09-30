@@ -26,4 +26,5 @@ if (state === "activation") {
   next.close();
 } else {
   console.log("already activated");
+  page.close();
 }

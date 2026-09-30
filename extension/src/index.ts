@@ -18,6 +18,7 @@ import {
 } from "../../src/protocol/messages.js";
 import { getBridgeConfig, getBridgeUri } from "./bridgeConfig.js";
 import { EXTENSION_VERSION } from "../../src/version.js";
+import { apiBatch, apiCall, apiDescribe, pcbDrc, pcbSnapshot } from "./api.js";
 
 type EasyEdaApi = Record<string, any>;
 
@@ -115,7 +116,12 @@ const handlers: Record<string, (params: Record<string, any>) => Promise<unknown>
   exportNetlist,
   exportGerber,
   exportPdf,
-  confirmedAction
+  confirmedAction,
+  apiCall,
+  apiBatch,
+  apiDescribe,
+  pcbSnapshot,
+  pcbDrc
 };
 
 export function activate(status?: string, arg?: string): void {
@@ -265,11 +271,23 @@ function closeSocket(): void {
 
 async function handleMessage(raw: string): Promise<void> {
   connectionState.lastServerMessageAt = Date.now();
-  let message: BridgeCallMessage | { kind: "ack" };
+  let message: BridgeCallMessage | { kind: "ack" } | { kind: "bye" };
   try {
-    message = JSON.parse(raw) as BridgeCallMessage | { kind: "ack" };
+    message = JSON.parse(raw) as BridgeCallMessage | { kind: "ack" } | { kind: "bye" };
   } catch (error) {
     log("warn", "Ignored malformed MCP bridge message", error);
+    return;
+  }
+
+  if (message.kind === "bye") {
+    // The server is shutting down; a new one usually follows within seconds.
+    connectionState.lostSinceLastOpen = true;
+    closeSocket();
+    connectionState.attemptIndex = 0;
+    handleConnectionFailure(normalizeError(apiError("bridge_closed", "The MCP server closed the bridge.")), {
+      manual: false,
+      shouldRetry: true
+    });
     return;
   }
 
@@ -843,7 +861,8 @@ function detectCapabilities(): Record<string, boolean> {
     schDocument: Boolean(eda.sch_Document),
     pcbManufactureData: Boolean(eda.pcb_ManufactureData),
     schManufactureData: Boolean(eda.sch_ManufactureData),
-    fileSystem: Boolean(eda.sys_FileSystem?.saveFile)
+    fileSystem: Boolean(eda.sys_FileSystem?.saveFile),
+    apiCall: true
   };
 }
 
