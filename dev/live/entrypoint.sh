@@ -5,6 +5,8 @@
 set -euo pipefail
 display=":${XVFB_DISPLAY:-77}"
 cdp_port=${EASYEDA_CDP_PORT:-9222}
+# `docker restart` keeps /tmp, and a stale lock makes Xvfb refuse to start.
+rm -f "/tmp/.X${display#:}-lock" "/tmp/.X11-unix/X${display#:}"
 Xvfb "$display" -screen 0 1920x1080x24 -nolisten tcp >/tmp/xvfb.log 2>&1 &
 export DISPLAY=$display
 sleep 1

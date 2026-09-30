@@ -35,6 +35,18 @@ for (let waited = 0; waited < 30_000; waited += 250) {
 }
 console.log("connected:", Boolean(status?.connected), `${Date.now() - started}ms`, "document:", status?.activeDocumentType);
 
+// Pro reports some API misuse only through a modal dialog (and the call may never
+// resolve), so flag any dialog a tool call leaves open.
+const probe = await Page.open();
+const openDialogs = () => probe.eval(`Array.from(document.querySelectorAll('[class*=modal_dialog_]'))
+  .filter(e => e.offsetParent && /dialog_[A-Za-z0-9]+$/.test(String(e.className).split(' ')[0]))
+  .map(e => e.innerText.replace(/\\s+/g, ' ').slice(0, 120))`);
+const closeErrorDialogs = () => probe.eval(`Array.from(document.querySelectorAll('[class*=modal_dialog_]'))
+  .filter(e => e.offsetParent && e.innerText.startsWith('Error'))
+  .forEach(e => Array.from(e.querySelectorAll('button')).filter(b => b.textContent.trim() == 'Confirm').forEach(b => b.click())); 1`);
+await closeErrorDialogs();
+const before = new Set(await openDialogs());
+
 let failures = 0;
 for (const [index, [name, toolArgs = {}, preview = 400]] of calls.entries()) {
   const t0 = Date.now();
@@ -50,6 +62,13 @@ for (const [index, [name, toolArgs = {}, preview = 400]] of calls.entries()) {
   fs.writeFileSync(path.join(outDir, `${String(index).padStart(2, "0")}-${name}.json`), body);
   if (result.isError) failures += 1;
   console.log(`${result.isError ? "✗" : "✓"} ${name} ${JSON.stringify(toolArgs).slice(0, 100)} ${Date.now() - t0}ms ${body.length}B\n  ${body.slice(0, preview)}`);
+  const leftOpen = (await openDialogs()).filter((text) => !before.has(text));
+  if (leftOpen.length > 0) {
+    failures += 1;
+    console.log(`  ! dialog left open by ${name}: ${JSON.stringify(leftOpen)}`);
+    await closeErrorDialogs();
+  }
 }
+probe.close();
 await client.close();
 process.exit(failures ? 1 : 0);

@@ -5,5 +5,5 @@
 set -euo pipefail
 name=${EASYEDA_LIVE_CONTAINER:-easyeda-mcp-live}
 docker exec "$name" bash -c 'export DISPLAY=:${XVFB_DISPLAY:-77}
-w=$(xdotool search --onlyvisible --class easyeda-pro | head -1)
+w=$(xdotool search --onlyvisible --name "JLCEDA Pro|EasyEDA Pro" | head -1)
 xdotool windowmove "$w" 0 0 windowsize "$w" 1920 1080'
