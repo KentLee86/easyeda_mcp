@@ -550,6 +550,47 @@ describe("schematic analysis", () => {
       expect(result.checks.map((check) => check.status)).toEqual(["pass", "pass"]);
     });
   });
+
+  describe("imported netflag naming (symbol-name net + otherProperty.Value)", () => {
+    const load = () => buildSchematicSnapshot({ ...loadFixture("imported-netflag-names.json"), includeRaw: false });
+    const netOf = (snapshot: ReturnType<typeof load>, primitiveId: string) => snapshot.pins.find((item) => item.primitiveId === primitiveId)?.net;
+
+    it("names pins by the netflag Value instead of the symbol-name string on flags and wires", () => {
+      const snapshot = load();
+
+      expect(netOf(snapshot, "e1p10")).toBe("GND");
+      expect(netOf(snapshot, "e1p17")).toBe("GND");
+      expect(snapshot.wires.find((item) => item.primitiveId === "w1")).toMatchObject({ net: "GND", sourceNet: "Sheet1-import_GND_POWER_GROUND" });
+      expect(snapshot.nets.map((net) => net.name)).not.toContain("Sheet1-import_GND_POWER_GROUND");
+      const result = verifyConnections(snapshot, [
+        { type: "pin_on_net", component: "U1", pin: "10", net: "GND" },
+        { type: "pin_on_net", component: "U1", pin: "17", net: "GND" },
+        { type: "pin_on_net", component: "U1", pin: "10", net: "Sheet1-import_GND_POWER_GROUND" }
+      ]);
+      expect(result.checks.map((check) => check.status)).toEqual(["pass", "pass", "pass"]);
+      expect(traceNet(snapshot, "GND").net?.connectedPins.map((item) => item.primitiveId).sort()).toEqual(["e1p10", "e1p17", "f1p"]);
+    });
+
+    it("merges groups joined through a repeated flag and keeps the explicit wire name", () => {
+      const snapshot = load();
+
+      expect(netOf(snapshot, "e1p3")).toBe("SENSE_A");
+      expect(netOf(snapshot, "e2p1")).toBe("SENSE_A");
+      const result = verifyConnections(snapshot, [
+        { type: "same_node", left: { component: "U1", pin: "3" }, right: { component: "R1", pin: "1" } },
+        { type: "pin_on_net", component: "U1", pin: "3", net: "IO7" }
+      ]);
+      expect(result.checks.map((check) => check.status)).toEqual(["pass", "pass"]);
+    });
+
+    it("keeps native-style netflag nets (no Value, or net not a symbol name)", () => {
+      const snapshot = load();
+
+      expect(netOf(snapshot, "e2p2")).toBe("VCC");
+      expect(snapshot.labels.find((item) => item.primitiveId === "f5")?.net).toBe("3V3");
+      expect(snapshot.nets.map((net) => net.name)).not.toContain("3.3V");
+    });
+  });
 });
 
 function component(designator: string, primitiveId: string, value: string): Record<string, unknown> {

@@ -1,0 +1,48 @@
+{
+  "_comment": "Synthetic. Reproduces the Altium/KiCad -> EasyEDA Pro import naming pattern: netflag `net` = its symbol name (same as name/symbol.name) and the real net name in otherProperty.Value; wires touching such flags carry the symbol-name string. Also: an explicitly named wire (SENSE_A) touching an IO7 flag that appears again elsewhere (Pro exports the merged net as SENSE_A), and native-style flags that must keep their `net`.",
+  "pages": [
+    {
+      "uuid": "sheet-1",
+      "name": "Sheet1",
+      "components": [
+        { "primitiveType": "Component", "componentType": "part", "primitiveId": "e1", "designator": "U1", "name": "MCU", "x": 0, "y": 50 },
+        { "primitiveType": "Component", "componentType": "part", "primitiveId": "e2", "designator": "R1", "name": "RES", "otherProperty": { "Value": "10k" }, "x": 150, "y": 100 },
+        { "primitiveType": "Component", "componentType": "netflag", "primitiveId": "f1", "designator": "#PWR?", "x": 40, "y": -10,
+          "net": "Sheet1-import_GND_POWER_GROUND", "name": "Sheet1-import_GND_POWER_GROUND",
+          "symbol": { "name": "Sheet1-import_GND_POWER_GROUND" }, "component": { "name": "Sheet1-import_GND_POWER_GROUND" },
+          "otherProperty": { "Value": "GND", "ki_keywords": "power-flag" } },
+        { "primitiveType": "Component", "componentType": "netflag", "primitiveId": "f2", "designator": "#PWR?", "x": 50, "y": 110,
+          "net": "Sheet1-import_IO7_CIRCLE", "name": "Sheet1-import_IO7_CIRCLE",
+          "symbol": { "name": "Sheet1-import_IO7_CIRCLE" }, "otherProperty": { "Value": "IO7" } },
+        { "primitiveType": "Component", "componentType": "netflag", "primitiveId": "f3", "designator": "#PWR?", "x": 150, "y": 160,
+          "net": "Sheet1-import_IO7_CIRCLE", "name": "Sheet1-import_IO7_CIRCLE",
+          "symbol": { "name": "Sheet1-import_IO7_CIRCLE" }, "otherProperty": { "Value": "IO7" } },
+        { "primitiveType": "Component", "componentType": "netflag", "primitiveId": "f4", "x": 250, "y": 110, "net": "VCC", "name": "VCC" },
+        { "primitiveType": "Component", "componentType": "netflag", "primitiveId": "f5", "x": 350, "y": 10, "net": "3V3", "name": "PowerSymbol", "otherProperty": { "Value": "3.3V" } }
+      ],
+      "pinsByComponent": {
+        "e1": [
+          { "primitiveId": "e1p10", "pinNumber": "10", "pinName": "GND", "x": 0, "y": 0 },
+          { "primitiveId": "e1p17", "pinNumber": "17", "pinName": "PAD", "x": 80, "y": 0 },
+          { "primitiveId": "e1p3", "pinNumber": "3", "pinName": "IO", "x": 0, "y": 100 }
+        ],
+        "e2": [
+          { "primitiveId": "e2p1", "pinNumber": "1", "pinName": "1", "x": 100, "y": 100 },
+          { "primitiveId": "e2p2", "pinNumber": "2", "pinName": "2", "x": 200, "y": 100 }
+        ],
+        "f1": [{ "primitiveId": "f1p", "pinNumber": "GND", "pinName": "GND", "x": 40, "y": 0 }],
+        "f2": [{ "primitiveId": "f2p", "pinNumber": "IO7", "pinName": "IO7", "x": 50, "y": 100 }],
+        "f3": [{ "primitiveId": "f3p", "pinNumber": "IO7", "pinName": "IO7", "x": 150, "y": 150 }],
+        "f4": [{ "primitiveId": "f4p", "pinNumber": "VCC", "pinName": "VCC", "x": 250, "y": 100 }],
+        "f5": [{ "primitiveId": "f5p", "pinNumber": "3V3", "pinName": "3V3", "x": 350, "y": 0 }]
+      },
+      "wires": [
+        { "primitiveId": "w1", "net": "Sheet1-import_GND_POWER_GROUND", "line": [0, 0, 40, 0, 40, 0, 80, 0] },
+        { "primitiveId": "w3", "net": "Sheet1-import_IO7_CIRCLE", "line": [0, 100, 50, 100] },
+        { "primitiveId": "w4", "net": "SENSE_A", "line": [100, 100, 150, 100, 150, 100, 150, 150] },
+        { "primitiveId": "w5", "net": "VCC", "line": [200, 100, 250, 100] },
+        { "primitiveId": "w6", "net": "3V3", "line": [300, 0, 350, 0] }
+      ]
+    }
+  ]
+}

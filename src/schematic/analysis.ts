@@ -56,6 +56,8 @@ export type SchematicWire = {
   primitiveId?: string;
   page?: SchematicPageRef;
   net?: string;
+  /** The wire's raw `net` when it was renamed (netflag symbol name -> real net name, or merged net). */
+  sourceNet?: string;
   nodeId?: string;
   geometry?: unknown;
   endpoints?: Position[];
@@ -237,17 +239,22 @@ export type VerifyConnectionsResult = {
 
 export function buildSchematicSnapshot(raw: RawSchematicData): SchematicSnapshot {
   const includeRaw = raw.includeRaw ?? true;
-  // Geometry is resolved strictly per page (coordinates and primitiveIds are
-  // only unique within a page); named nets then merge globally by name in buildNets.
-  const pageResults = raw.pages
-    ? raw.pages.map((page) => buildPageData(page, { uuid: page.uuid, ...(page.name ? { name: page.name } : {}) }, includeRaw))
-    : [buildPageData(raw, undefined, includeRaw)];
+  const pageInputs: Array<{ input: RawPageInput; page?: SchematicPageRef }> = raw.pages
+    ? raw.pages.map((page) => ({ input: page, page: { uuid: page.uuid, ...(page.name ? { name: page.name } : {}) } }))
+    : [{ input: raw }];
+  // Pass 1: normalize every page. Geometry is later resolved strictly per page
+  // (coordinates and primitiveIds are only unique within a page).
+  const symbolAliases = collectSymbolNetAliases(pageInputs.flatMap(({ input }) => input.components ?? []));
+  const prepared = pageInputs.map(({ input, page }) => preparePage(input, page, includeRaw, symbolAliases));
+  // Pass 2: net names are global, so names meeting on any wire group merge into one net.
+  const naming = buildCanonicalNetNames(prepared);
+  const pageResults = prepared.map((item) => finishPage(item, naming.canonical));
   const components = pageResults.flatMap((item) => item.components);
   const pins = pageResults.flatMap((item) => item.pins);
   const wires = pageResults.flatMap((item) => item.wires);
   const labels = pageResults.flatMap((item) => item.labels);
   const nets = buildNets(pins, wires, labels);
-  const warnings = pageResults.flatMap((item) => item.warnings);
+  const warnings = [...pageResults.flatMap((item) => item.warnings), ...naming.warnings];
 
   return {
     components,
@@ -271,14 +278,19 @@ export function buildSchematicSnapshot(raw: RawSchematicData): SchematicSnapshot
 
 type RawPageInput = Pick<RawSchematicPage, "components" | "pinsByComponent" | "wires" | "texts">;
 
-function buildPageData(raw: RawPageInput, page: SchematicPageRef | undefined, includeRaw: boolean): {
+type PreparedPage = {
+  page?: SchematicPageRef;
   components: SchematicComponent[];
   pins: SchematicPin[];
   wires: SchematicWire[];
   labels: SchematicLabel[];
-  warnings: string[];
-} {
+};
+
+type NetNameResolver = (name: string | undefined) => string | undefined;
+
+function preparePage(raw: RawPageInput, page: SchematicPageRef | undefined, includeRaw: boolean, symbolAliases: Map<string, string>): PreparedPage {
   const withPage = <T extends object>(item: T): T => (page ? { ...item, page } : item);
+  const alias = (name: string | undefined) => (name ? symbolAliases.get(name) ?? name : name);
   const rawComponents = raw.components ?? [];
   const components = rawComponents.map((component) => withPage(normalizeComponent(component, includeRaw)));
   // Lookup is local to this page, so identical primitiveIds on other pages never collide.
@@ -288,11 +300,16 @@ function buildPageData(raw: RawPageInput, page: SchematicPageRef | undefined, in
   for (const [componentPrimitiveId, rawPins] of Object.entries(raw.pinsByComponent ?? {})) {
     const component = componentById.get(componentPrimitiveId);
     for (const rawPin of rawPins) {
-      pins.push(withPage(normalizePin(rawPin, componentPrimitiveId, component?.designator, includeRaw)));
+      const pin = normalizePin(rawPin, componentPrimitiveId, component?.designator, includeRaw);
+      pins.push(withPage(pin.net && alias(pin.net) !== pin.net ? withNetName(pin, alias(pin.net)) : pin));
     }
   }
 
-  const wires = (raw.wires ?? []).map((wire) => withPage(normalizeWire(wire, includeRaw)));
+  const wires = (raw.wires ?? []).map((wire) => {
+    const normalized = normalizeWire(wire, includeRaw);
+    const renamed = alias(normalized.net);
+    return withPage(renamed !== normalized.net ? { ...normalized, net: renamed, sourceNet: normalized.net } : normalized);
+  });
   const componentLabels = rawComponents.flatMap((component) => normalizeComponentLabel(component, includeRaw)).map((label) => {
     const connectionPoints = pins
       .filter((pin) => label.primitiveId && pin.componentPrimitiveId === label.primitiveId)
@@ -300,11 +317,26 @@ function buildPageData(raw: RawPageInput, page: SchematicPageRef | undefined, in
       .filter((position) => requiredPosition(position));
     return withPage(connectionPoints.length > 0 ? { ...label, connectionPoints } : label);
   });
-  const rawLabels = [
+  const labels = [
     ...componentLabels,
     ...(raw.texts ?? []).flatMap((text) => normalizeTextLabel(text, includeRaw)).map(withPage)
   ];
-  const resolved = resolveConnectivity(pins, wires, rawLabels, page);
+  return { page, components, pins, wires, labels };
+}
+
+function finishPage(prepared: PreparedPage, canonical: NetNameResolver): {
+  components: SchematicComponent[];
+  pins: SchematicPin[];
+  wires: SchematicWire[];
+  labels: SchematicLabel[];
+  warnings: string[];
+} {
+  const { page, components, pins } = prepared;
+  const wires = prepared.wires.map((wire) => {
+    const name = canonical(wire.net);
+    return name !== wire.net ? { ...wire, net: name, sourceNet: wire.sourceNet ?? wire.net } : wire;
+  });
+  const resolved = resolveConnectivity(pins.map((pin) => withNetName(pin, canonical(pin.net))), wires, prepared.labels, page, canonical);
   const where = page ? ` on page ${page.name ?? page.uuid}` : "";
   const warnings: string[] = [];
 
@@ -321,6 +353,127 @@ function buildPageData(raw: RawPageInput, page: SchematicPageRef | undefined, in
     pins: resolved.pins,
     wires: resolved.wires,
     labels: resolved.labels,
+    warnings
+  };
+}
+
+function withNetName(pin: SchematicPin, net: string | undefined): SchematicPin {
+  if (!net || net === pin.net) {
+    return pin;
+  }
+  return {
+    ...pin,
+    net,
+    connectivityEvidence: pin.connectivityEvidence ? { ...pin.connectivityEvidence, net } : pin.connectivityEvidence
+  };
+}
+
+/**
+ * Imported (Altium/KiCad -> Pro) designs give netflags `net` = the flag's symbol
+ * name (e.g. "Sheet1_GND_POWER_GROUND", identical to `name`/`symbol.name`) and put
+ * the real global net name in `otherProperty.Value` ("GND"); wires touching such
+ * flags carry the same symbol-name string. Pro's netlist uses "GND". So when a
+ * netflag's `net` is just its symbol name and Value differs, Value is the net
+ * name. Native Pro flags (net already real, Value absent/equal) are unchanged.
+ */
+function flagNetName(item: Record<string, unknown>): string | undefined {
+  const net = normalizeNetName(item.net ?? item.netName);
+  const value = normalizeNetName(asRecord(item.otherProperty).Value ?? item.value);
+  if (!net) {
+    return value;
+  }
+  const symbolNames = [item.name, asRecord(item.symbol).name, asRecord(item.component).name].map(stringValue);
+  return value && value !== net && symbolNames.includes(net) ? value : net;
+}
+
+function collectSymbolNetAliases(rawComponents: unknown[]): Map<string, string> {
+  const candidates = new Map<string, Set<string>>();
+  for (const raw of rawComponents) {
+    const item = asRecord(raw);
+    if (!isNetFlagType(stringValue(item.componentType ?? item.primitiveType))) {
+      continue;
+    }
+    const net = normalizeNetName(item.net ?? item.netName);
+    const name = flagNetName(item);
+    if (net && name && name !== net) {
+      candidates.set(net, new Set([...(candidates.get(net) ?? []), name]));
+    }
+  }
+  // A symbol name that maps to several different values is ambiguous; leave it as is.
+  return new Map([...candidates].filter(([, names]) => names.size === 1).map(([net, names]) => [net, [...names][0]]));
+}
+
+/**
+ * Names that meet on one wire group (wire nets and netflag names, on any page)
+ * are one electrical net. The representative name prefers explicit wire net
+ * names (net labels; not renamed from a netflag symbol) over netflag names,
+ * which matches Pro's netlist (a "TEMP_1" labelled wire touching a "DIO23"
+ * flag is exported as TEMP_1); ties are broken alphabetically. Heuristic text
+ * labels never merge names, and a group holding two different explicit wire
+ * nets is left ambiguous instead of merged.
+ */
+function buildCanonicalNetNames(pages: PreparedPage[]): { canonical: NetNameResolver; warnings: string[] } {
+  const parent = new Map<string, string>();
+  const display = new Map<string, string>();
+  const explicit = new Set<string>();
+  const find = (name: string): string => {
+    let root = name;
+    while (parent.get(root) !== root) root = parent.get(root) ?? root;
+    parent.set(name, root);
+    return root;
+  };
+  const add = (name: string): string => {
+    const key = name.toLowerCase();
+    if (!parent.has(key)) {
+      parent.set(key, key);
+      display.set(key, name);
+    }
+    return key;
+  };
+  const unite = (names: string[]): void => {
+    const keys = names.map(add);
+    for (const key of keys.slice(1)) {
+      const left = find(keys[0]);
+      const right = find(key);
+      if (left !== right) parent.set(right, left);
+    }
+  };
+
+  for (const page of pages) {
+    for (const wire of page.wires) {
+      if (wire.net && !wire.sourceNet) explicit.add(add(wire.net));
+    }
+    for (const pin of page.pins) {
+      if (pin.net) add(pin.net);
+    }
+    const wireData = page.wires.map((wire) => ({ wire, segments: extractSegments(wire.geometry) }));
+    const flagLabels = page.labels.filter((label) => label.type !== "text");
+    for (const group of buildConnectivityGroups(wireData, flagLabels, 0.01, page.page)) {
+      // Pro computes wire nets itself: two different explicit wire names on one
+      // geometric group mean our touch test over-connected, so don't merge them.
+      const explicitNames = unique(group.wireIndexes.map((index) => page.wires[index]).filter((wire) => wire.net && !wire.sourceNet).map((wire) => wire.net?.toLowerCase()));
+      if (group.netNames.length > 1 && explicitNames.length <= 1) unite(group.netNames);
+    }
+  }
+
+  const members = new Map<string, string[]>();
+  for (const key of parent.keys()) {
+    const root = find(key);
+    members.set(root, [...(members.get(root) ?? []), key]);
+  }
+  const representative = new Map<string, string>();
+  const warnings: string[] = [];
+  for (const keys of members.values()) {
+    const byName = (left: string, right: string) => (display.get(left) ?? left).localeCompare(display.get(right) ?? right);
+    const explicitKeys = keys.filter((key) => explicit.has(key)).sort(byName);
+    const chosen = display.get(explicitKeys[0] ?? [...keys].sort(byName)[0]) ?? keys[0];
+    for (const key of keys) representative.set(key, chosen);
+    if (explicitKeys.length > 1) {
+      warnings.push(`Net names ${explicitKeys.map((key) => display.get(key)).join(", ")} are connected; using ${chosen}.`);
+    }
+  }
+  return {
+    canonical: (name) => (name ? representative.get(name.toLowerCase()) ?? name : name),
     warnings
   };
 }
@@ -913,10 +1066,8 @@ function normalizeWire(raw: unknown, includeRaw: boolean): SchematicWire {
 function normalizeComponentLabel(raw: unknown, includeRaw: boolean): SchematicLabel[] {
   const item = asRecord(raw);
   const componentType = stringValue(item.componentType ?? item.primitiveType);
-  const otherProperty = asRecord(item.otherProperty);
-  // Netflag/netport components may carry their net name only as the value (e.g. "GND").
-  const net = normalizeNetName(item.net ?? item.netName ?? item.value ?? otherProperty.Value);
-  if (!net || !componentType || !["netflag", "netport", "short_symbol"].includes(componentType)) {
+  const net = flagNetName(item);
+  if (!net || !isNetFlagType(componentType)) {
     return [];
   }
   return [{
@@ -929,6 +1080,10 @@ function normalizeComponentLabel(raw: unknown, includeRaw: boolean): SchematicLa
     },
     raw: includeRaw ? compactRaw(item) : undefined
   }];
+}
+
+function isNetFlagType(componentType: string | undefined): boolean {
+  return componentType !== undefined && ["netflag", "netport", "short_symbol"].includes(componentType);
 }
 
 function normalizeTextLabel(raw: unknown, includeRaw: boolean): SchematicLabel[] {
@@ -1011,6 +1166,7 @@ function resolveConnectivity(
   wires: SchematicWire[],
   labels: SchematicLabel[],
   page?: SchematicPageRef,
+  canonical: NetNameResolver = (name) => name,
   tolerance = 0.01
 ): {
   pins: SchematicPin[];
@@ -1022,7 +1178,7 @@ function resolveConnectivity(
     wire,
     segments: extractSegments(wire.geometry)
   }));
-  const groups = buildConnectivityGroups(wireData, labels, tolerance, page);
+  const groups = buildConnectivityGroups(wireData, labels, tolerance, page, canonical);
   const resolvedWires = wires.map((wire, index) => {
     const group = groups.find((item) => item.wireIndexes.includes(index));
     return {
@@ -1126,7 +1282,13 @@ function resolvePinConnectivity(pin: SchematicPin, groups: ConnectivityGroup[], 
   };
 }
 
-function buildConnectivityGroups(wireData: WireWithSegments[], labels: SchematicLabel[], tolerance: number, page?: SchematicPageRef): ConnectivityGroup[] {
+function buildConnectivityGroups(
+  wireData: WireWithSegments[],
+  labels: SchematicLabel[],
+  tolerance: number,
+  page?: SchematicPageRef,
+  canonical: NetNameResolver = (name) => name
+): ConnectivityGroup[] {
   const parent = wireData.map((_, index) => index);
   const find = (index: number): number => {
     while (parent[index] !== index) {
@@ -1164,11 +1326,18 @@ function buildConnectivityGroups(wireData: WireWithSegments[], labels: Schematic
     const touchingLabels = labels.filter((label) => labelTouchesSegments(label, segments, tolerance));
     const labelNetNames = unique(touchingLabels.map((label) => label.net).filter(isPresent));
     const allNetNames = unique([...wireNetNames, ...labelNetNames]);
-    // The editor-computed wire net is authoritative; label names only name
-    // groups without a wire net (they remain aliases via netNames otherwise).
-    const net = wireNetNames.length === 1
-      ? wireNetNames[0]
-      : wireNetNames.length === 0 && labelNetNames.length === 1 ? labelNetNames[0] : undefined;
+    // The wire net is authoritative; netflag names name groups without a wire
+    // net, and heuristic text labels only when nothing else names the group.
+    // Label names stay aliases via netNames. `canonical` maps names already
+    // merged globally (see buildCanonicalNetNames) to one representative.
+    const canonicalWireNames = unique(wireNetNames.map(canonical).filter(isPresent));
+    const flagNames = unique(touchingLabels.filter((label) => label.type !== "text").map((label) => canonical(label.net)).filter(isPresent));
+    const textNames = unique(touchingLabels.filter((label) => label.type === "text").map((label) => canonical(label.net)).filter(isPresent));
+    const net = canonicalWireNames.length === 1
+      ? canonicalWireNames[0]
+      : canonicalWireNames.length === 0 && flagNames.length === 1
+        ? flagNames[0]
+        : canonicalWireNames.length === 0 && flagNames.length === 0 && textNames.length === 1 ? textNames[0] : undefined;
     return {
       // Named groups share a global net node; unnamed groups stay page-local.
       nodeId: net ? netNodeId(net) : page ? `node:${page.uuid}:${groupIndex + 1}` : `node:${groupIndex + 1}`,
@@ -1325,7 +1494,10 @@ function findComponent(snapshot: SchematicSnapshot, query: string): SchematicCom
 }
 
 function findNet(snapshot: SchematicSnapshot, query: string): SchematicNet | undefined {
+  // Raw (pre-rename) wire net names such as "Sheet1_GND_POWER_GROUND" still resolve.
+  const renamed = snapshot.wires.find((wire) => wire.net && sameText(wire.sourceNet, query))?.net;
   return snapshot.nets.find((net) => sameText(net.name, query))
+    ?? (renamed ? snapshot.nets.find((net) => sameText(net.name, renamed)) : undefined)
     ?? snapshot.nets.find((net) => net.name.toLowerCase().includes(query.toLowerCase()));
 }
 
