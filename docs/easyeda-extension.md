@@ -16,9 +16,11 @@ Then in EasyEDA Pro:
 
 1. import or load the packaged extension
 2. enable external interaction permission
-3. open a schematic or PCB
-4. use `MCP Bridge -> Reconnect` if it does not connect automatically
+3. optionally enable "Show at header menu" to get the `MCP Bridge` menu
+4. open a schematic or PCB
 5. run `easyeda_doctor` from your MCP client
+
+The extension connects on its own; a short toast confirms the connection.
 
 ## What Gets Built
 
@@ -47,7 +49,19 @@ Enable it for this extension. The bridge needs it because the extension uses `SY
 ws://127.0.0.1:8765
 ```
 
+The permission ("Allow interactive with external") is off right after install, and EasyEDA Pro does not start an extension on install. Enabling the permission starts the extension and it connects within a few seconds; after that it also starts with EasyEDA Pro. If the permission is later found missing, the extension shows the hint once and keeps retrying.
+
 If this permission is off, the MCP client may show tools, but live editor calls will fail.
+
+## Versions
+
+The server and extension must speak the same bridge protocol. Current versions:
+
+- npm package: `1.1.0`
+- extension: `0.2.0`
+- bridge protocol: `0.2.0`
+
+After updating, rebuild with `npm run setup:local`, reinstall the `.eext`, and restart the MCP client.
 
 ## Verify
 
@@ -69,14 +83,24 @@ Then ask:
 Run easyeda_get_context.
 ```
 
+## Connection Behavior
+
+- the extension sends a heartbeat every 5 s and the server acks it
+- if the server goes away, the extension notices within about 15 s
+- it then retries every 5 s, indefinitely
+
+Restarting the MCP server or client therefore needs no action in EasyEDA Pro.
+
 ## Extension Menu
+
+The `MCP Bridge` header menu is off by default after install. Enable it in Extensions Manager -> the extension -> Config -> "Show at header menu".
 
 Use these commands inside EasyEDA Pro when needed:
 
 - `MCP Bridge -> Reconnect`
 - `MCP Bridge -> Run Diagnostics`
 
-`Reconnect` is the fastest fix when the server was restarted after EasyEDA Pro was already open.
+`Reconnect` skips the retry wait. On narrow windows (about 1280 px) EasyEDA folds extension menus in editors into an overflow button.
 
 ## Packaging Rules
 

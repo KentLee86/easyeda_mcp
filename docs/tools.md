@@ -57,13 +57,15 @@ Use this first when anything feels broken.
 
 Returns a broader summary of the current editor context, including active document details and some available counts for project data.
 
+Document types follow EasyEDA Pro's editor document types: `schematic`, `pcb`, `symbol`, `footprint`, `panel`, `home`, or `unknown`.
+
 Use this to confirm the AI is looking at the right EasyEDA Pro document.
 
 ## Search and Inspection
 
 ### `easyeda_find_component`
 
-Searches the active project for components matching a designator, name, value, footprint, or property text.
+Searches the active project for components. An exact designator match wins, so `R1` returns `R1` and not `R10`. Otherwise it matches substrings of the designator, value, name, or footprint.
 
 Good queries: `U1`, `USB1`, `TPS`, `regulator`, or a footprint name.
 
@@ -74,6 +76,17 @@ Searches nets by name and returns available net metadata and connections.
 Good queries: `GND`, `VCC_5V`, `SDA`, `VBUS`, `D+`, or `CC1`.
 
 ## Schematic Analysis
+
+Schematic tools take `allPages` (default `true`) and then read every schematic page of the board. Pins and wires are only readable on the open page, so the extension briefly opens each page and then reopens the document you had open.
+
+With several pages:
+
+- connectivity is computed per page
+- named nets (net labels, net flags, wire net names) merge across pages
+- a multi-part component (same designator on several pages) is merged for component and pin queries
+- items carry `page: { uuid, name }` and `counts.pages` reports the page count
+
+On imported designs where a net flag's net holds the symbol name, the flag's Value is used as the net name, matching EasyEDA Pro's netlist.
 
 ### `easyeda_schematic_snapshot`
 
@@ -188,23 +201,46 @@ Use it when:
 
 Zooms the active PCB editor to the board outline.
 
+### Export tools
+
+Export tools do not open an EasyEDA save dialog. The extension returns the file contents and the MCP server writes the file.
+
+Shared inputs:
+
+- `outputPath`: a file path, or a directory ending in `/`. Default: `$EASYEDA_MCP_EXPORT_DIR`, else `<os tmp>/easyeda-mcp-exports/`
+- `overwrite`: default `false`; an existing file is an error
+- `maxInlineChars`: default `20000`; how much text to return inline
+- `scope` (BOM, netlist, PDF): `auto` (default) follows the active document, schematic or PCB
+
+Result shape:
+
+```json
+{ "path": "...", "fileName": "...", "bytes": 1234, "mimeType": "text/csv", "text": "...", "truncated": false, "note": "..." }
+```
+
+`text` is returned for BOM `csv`/`json` and for netlists. `truncated` and `note` appear only when relevant.
+
+These tools write files, so they are not annotated read-only.
+
 ### `easyeda_export_bom`
 
 Exports a BOM from the active project.
 
 Supported formats:
 
-- `csv`
-- `xlsx`
-- `json`
+- `csv`: UTF-8 CSV (EasyEDA's tab-separated UTF-16 output is converted)
+- `xlsx`: binary
+- `json`: an array of row objects
 
 ### `easyeda_export_netlist`
 
 Exports a netlist from the active schematic or PCB context.
 
+Some projects (for example imported ones) return no schematic netlist. The tool then fails with `export_unavailable`; open the PCB and export with `scope: "pcb"`.
+
 ### `easyeda_export_gerber`
 
-Exports Gerber fabrication data from the active PCB.
+Exports Gerber fabrication data (zip) from the active PCB. PCB only.
 
 ### `easyeda_export_pdf`
 
@@ -214,28 +250,35 @@ Exports a PDF from the active schematic or PCB document.
 
 ### `easyeda_confirmed_action`
 
-Runs a mutating EasyEDA Pro action only when the confirmation text explicitly confirms the action.
+Runs a mutating EasyEDA Pro action only when `confirmation` is exactly `CONFIRM <action>` for the same action. Matching is case-insensitive and whitespace is normalized.
 
-Supported actions:
+| Action | Confirmation | Notes |
+| --- | --- | --- |
+| `save` | `CONFIRM save` | saves the active schematic page or PCB; other documents fail with `unsupported_document` |
+| `importChanges` | `CONFIRM importChanges` | |
+| `autoroute` | `CONFIRM autoroute` | requires `params.json` |
+| `autolayout` | `CONFIRM autolayout` | requires `params.json` |
 
-- `save`
-- `importChanges`
-- `autoroute`
-- `autolayout`
+Anything else, including free-form phrases like `I confirm` or `confirmed`, is rejected with `confirmation_required`. The error includes `expectedConfirmation`.
 
-The confirmation text must include an explicit confirmation phrase such as:
+The client should send the confirmation only after the user explicitly approves the action.
 
-- `I confirm`
-- `confirmed`
-- `confirma`
-- `confirmo`
+For `autoroute` and `autolayout`, `params.json` is the router's result JSON text. Without it the tool fails with `missing_json`.
 
 Example shape:
 
 ```json
 {
   "action": "save",
-  "confirmation": "I confirm"
+  "confirmation": "CONFIRM save"
+}
+```
+
+```json
+{
+  "action": "autoroute",
+  "confirmation": "CONFIRM autoroute",
+  "params": { "json": "<router result JSON text>" }
 }
 ```
 

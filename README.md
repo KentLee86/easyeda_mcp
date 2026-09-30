@@ -60,7 +60,7 @@ Then:
 1. configure your MCP client to run `node /absolute/path/to/easyeda_mcp/dist/index.js`
 2. open EasyEDA Pro
 3. load the packaged extension from `build/dist`
-4. enable external interaction permission
+4. enable external interaction permission (the extension connects on its own once it is on)
 5. open a schematic or PCB
 6. ask your MCP client to run `easyeda_doctor`
 
@@ -83,15 +83,15 @@ Core capabilities:
 - schematic inspection for components, pins, nets, wires, and labels
 - component and net tracing
 - targeted connection assertions
-- editor navigation and export helpers
-- confirmation-gated editor-changing actions
+- editor navigation and file exports (BOM, netlist, Gerber, PDF) written to a local path
+- editor-changing actions gated by an exact `CONFIRM <action>` confirmation
 
 ## Documentation
 
 - [Quick Start](https://vlabsoft.org/easyeda_mcp/quick-start): shortest path to a working setup
 - [Getting Started](https://vlabsoft.org/easyeda_mcp/getting-started): first-time setup with more context
 - [AI Client Setup](https://vlabsoft.org/easyeda_mcp/ai-client-setup): Claude Desktop, Codex CLI, Claude Code CLI, VS Code, and generic MCP clients
-- [EasyEDA Pro Extension Setup](https://vlabsoft.org/easyeda_mcp/easyeda-extension): install and reconnect the editor extension
+- [EasyEDA Pro Extension Setup](https://vlabsoft.org/easyeda_mcp/easyeda-extension): install and connect the editor extension
 - [Tools Reference](https://vlabsoft.org/easyeda_mcp/tools): available MCP tools
 - [Troubleshooting](https://vlabsoft.org/easyeda_mcp/troubleshooting): fixes by symptom
 
@@ -109,6 +109,10 @@ npm run docs:build
 ```
 
 `npm run setup:local` builds the MCP server, builds the EasyEDA Pro extension bundle, and packages the `.eext` artifact.
+
+Server and extension must use the same bridge protocol (currently `0.2.0`; npm package `1.1.0`, extension `0.2.0`). After updating, rebuild and reinstall both.
+
+For live testing against a real editor, see [Live development with EasyEDA Pro in Docker](./docs/live-dev.md).
 
 ## Scope, Safety, and Status
 

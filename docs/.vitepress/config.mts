@@ -37,6 +37,12 @@ export default defineConfig({
         ]
       },
       {
+        text: "Development",
+        items: [
+          { text: "Live development with EasyEDA Pro in Docker", link: "/live-dev" }
+        ]
+      },
+      {
         text: "Project",
         collapsed: true,
         items: [

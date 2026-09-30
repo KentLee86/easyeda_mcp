@@ -19,6 +19,8 @@ These workflows do not directly change project content:
 
 Use them freely during review and debugging.
 
+Exports do not change the project, but they write a file on your machine (by default under `$EASYEDA_MCP_EXPORT_DIR` or `<os tmp>/easyeda-mcp-exports/`). They never overwrite an existing file unless `overwrite: true` is passed.
+
 ## Actions That Can Change the Project
 
 Project-changing actions go through:
@@ -34,14 +36,16 @@ Supported actions:
 - `autoroute`
 - `autolayout`
 
-The tool blocks the request unless the confirmation text contains a clear confirmation phrase.
+The tool blocks the request unless `confirmation` is exactly `CONFIRM <action>` for the same action (case-insensitive, whitespace normalized):
 
-Accepted examples:
+- `CONFIRM save`
+- `CONFIRM importChanges`
+- `CONFIRM autoroute`
+- `CONFIRM autolayout`
 
-- `I confirm`
-- `confirmed`
-- `confirma salvar`
-- `confirmo`
+Anything else, including `I confirm`, `confirmed`, or a phrase for a different action, is rejected with `confirmation_required`. The error includes `expectedConfirmation`.
+
+The MCP client should send the confirmation only after the user explicitly approves that action. It should not fill it in on its own.
 
 ## Why Confirmation Exists
 

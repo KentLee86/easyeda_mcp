@@ -164,7 +164,7 @@ Open EasyEDA Pro, then:
 1. import the packaged extension from `build/dist`
 2. enable external interaction permission
 3. open a schematic or PCB project
-4. use `MCP Bridge -> Reconnect` if the bridge does not connect automatically
+4. wait a few seconds; the extension connects on its own and retries every 5 s
 
 ## 5. Verify
 

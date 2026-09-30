@@ -49,9 +49,11 @@ Responsibilities:
 
 - wait for the EasyEDA Pro extension
 - track connection status
+- ack the extension's 5 s heartbeat
 - send method calls to the extension
 - enforce timeouts
-- report compatibility problems
+- report compatibility problems (bridge protocol `0.2.0`)
+- if the port is taken, stay up, report it through the tools, and retry every 5 s
 
 ### Tool Layer
 
@@ -66,7 +68,8 @@ Responsibilities:
 - define MCP tool names
 - define schemas
 - route read-only calls
-- gate mutating calls behind confirmation
+- gate mutating calls behind an exact `CONFIRM <action>` confirmation
+- write export files returned by the extension (`src/mcp/exportFiles.ts`)
 
 ### EasyEDA Pro Extension
 
@@ -78,10 +81,11 @@ extension/src/index.ts
 
 Responsibilities:
 
-- connect to the local WebSocket bridge
+- connect to the local WebSocket bridge and reconnect on its own
 - receive bridge calls
 - call EasyEDA Pro `eda.*` APIs
-- return editor data to the MCP server
+- open each schematic page when reading all pages, then restore the user's document
+- return editor data and export file contents to the MCP server
 
 ### Schematic Analysis
 
@@ -94,6 +98,7 @@ src/schematic/analysis.ts
 Responsibilities:
 
 - normalize components, pins, wires, labels, and nets
+- compute connectivity per page and merge named nets and multi-part components across pages
 - trace nets and components
 - find unconnected pins
 - validate schematic areas
@@ -116,6 +121,7 @@ When an AI client calls a tool:
 This architecture keeps the system local and live:
 
 - no project export is required for normal inspection
+- exports never open an EasyEDA save dialog; the server writes the file
 - the AI sees the project that is actually open
 - EasyEDA-specific API calls stay inside the extension
 - MCP clients get a stable tool interface

@@ -26,6 +26,10 @@ The shortest path is:
 - [Safety Model](./safety.md): read-only defaults and confirmed actions
 - [Architecture](./architecture.md): how server, bridge, and extension fit together
 
+## Development
+
+- [Live development with EasyEDA Pro in Docker](./live-dev.md): run EasyEDA Pro in a container for live testing
+
 ## What This Project Does
 
 EasyEDA Pro MCP Bridge runs locally and connects:
@@ -41,7 +45,7 @@ Once connected, an AI client can:
 - trace schematic nets and components
 - verify targeted connection assertions
 - navigate to components or regions
-- export BOM, netlist, Gerber, and PDF files
+- export BOM, netlist, Gerber, and PDF files to local paths
 - run a small set of editor-changing actions only after explicit confirmation
 
 ## Current Scope

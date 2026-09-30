@@ -16,9 +16,25 @@ Fix:
 2. make sure EasyEDA Pro is open
 3. open a schematic or PCB
 4. confirm the extension is installed or loaded
-5. enable external interaction permission
-6. run `MCP Bridge -> Reconnect`
+5. enable external interaction permission ("Allow interactive with external"); it is off right after install
+6. wait a few seconds: the extension retries every 5 s and connects as soon as the server and permission are available
 7. run `easyeda_doctor` again
+
+Restarting the MCP server or client does not need a manual reconnect. The extension notices a lost server within about 15 s and keeps retrying. `MCP Bridge -> Reconnect` is still available if you do not want to wait.
+
+If `easyeda_doctor` reports a protocol mismatch, rebuild and reinstall both pieces with `npm run setup:local`. Server and extension must use the same bridge protocol (currently `0.2.0`).
+
+## MCP Bridge Menu Is Missing
+
+The header menu is off by default after install.
+
+Fix:
+
+1. open Extensions Manager
+2. select the extension and open Config
+3. enable "Show at header menu"
+
+On narrow windows (about 1280 px) EasyEDA folds extension menus in editors into an overflow button.
 
 ## MCP Client Does Not Show Tools
 
@@ -31,7 +47,7 @@ Fix:
 
 1. run `npm run setup:local`
 2. restart the MCP client
-3. reconnect the EasyEDA Pro extension
+3. run `easyeda_doctor` once the extension reconnects on its own
 
 Why: most MCP clients load the tool catalog when the session starts.
 
@@ -64,6 +80,19 @@ Check:
 3. `EASYEDA_MCP_WS_HOST` was not changed unexpectedly
 4. `EASYEDA_MCP_WS_PORT` was not changed unexpectedly
 5. local security tooling is not blocking loopback WebSocket traffic
+
+## Bridge Port Is Used by Another Process
+
+You may see `easyeda_doctor` or other tools report the bridge as unavailable with a message like `Bridge port 127.0.0.1:8765 is used by another process ...`.
+
+Only one MCP server can talk to the extension at a time. A second server (for example from a second MCP client) does not exit. It stays up, retries every 5 s, and takes the port once the first server stops.
+
+Fix:
+
+1. stop the other MCP server or client, or
+2. use a different port for both sides: set `EASYEDA_MCP_WS_PORT` for the server, and point the extension at the same port
+
+The extension has no settings UI for the port. Change the default in `extension/src/bridgeConfig.ts` and rebuild, or define `globalThis.__EASYEDA_MCP_BRIDGE_CONFIG__` (for example `{ port: 8766 }`) before the extension loads.
 
 ## EasyEDA Pro Rejects the Extension Package
 
@@ -100,6 +129,10 @@ What to do:
 
 Why: EasyEDA Pro may expose partial raw schematic primitives, so some connectivity is inferred.
 
+If every pin shows as unconnected on a real design, update both server and extension: older builds could not parse EasyEDA Pro 3.x wire geometry.
+
+With `allPages: true` (the default) the extension briefly switches through every schematic page and then reopens your document. That flicker is expected.
+
 ## Navigation Goes to the Wrong Place
 
 Fix:
@@ -113,10 +146,15 @@ Fix:
 
 Check:
 
-1. the active document type supports that export
-2. the expected schematic or PCB is currently active
+1. the active document type supports that export (Gerber is PCB only)
+2. the expected schematic or PCB is currently active, or `scope` is set
 3. the extension is connected
 4. the relevant EasyEDA manufacture API is available
+5. the target file does not already exist, or pass `overwrite: true`
+
+Exports do not open a save dialog. The server writes the file and returns its `path`.
+
+If the netlist export fails with `export_unavailable`, EasyEDA Pro returned no schematic netlist for this project (common on imported projects). Open the PCB and export with `scope: "pcb"`.
 
 Then run:
 
@@ -126,23 +164,21 @@ Run easyeda_doctor.
 
 ## Confirmed Actions Are Blocked
 
-Mutating actions require explicit confirmation.
+Mutating actions require explicit confirmation. The error code is `confirmation_required` and the error includes `expectedConfirmation`.
 
-Use a confirmation string such as:
-
-- `I confirm`
-- `confirmed`
-- `confirma salvar`
-- `confirmo`
-
-Example:
+After the user approves, send exactly `CONFIRM <action>` for the same action (case-insensitive):
 
 ```json
 {
   "action": "save",
-  "confirmation": "I confirm"
+  "confirmation": "CONFIRM save"
 }
 ```
+
+Other errors:
+
+- `unsupported_document`: `save` needs an open schematic page or PCB
+- `missing_json`: `autoroute` and `autolayout` need `params.json` with the router's result JSON text
 
 ## Reliable Reset
 
@@ -152,5 +188,5 @@ When the state is confusing:
 2. reopen EasyEDA Pro
 3. start the MCP client again
 4. open the target project
-5. run `MCP Bridge -> Reconnect`
+5. wait for the extension to reconnect (or run `MCP Bridge -> Reconnect`)
 6. run `easyeda_doctor`

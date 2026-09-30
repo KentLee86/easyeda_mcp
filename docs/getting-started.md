@@ -64,7 +64,7 @@ In EasyEDA Pro:
 1. import the packaged extension from `build/dist`
 2. enable external interaction permission
 3. open a schematic or PCB project
-4. use `MCP Bridge -> Reconnect` if it does not auto-connect
+4. wait a few seconds; the extension connects on its own and retries every 5 s
 
 Use [EasyEDA Pro Extension Setup](./easyeda-extension.md) if you need the full extension flow.
 
@@ -136,3 +136,6 @@ Optional overrides:
 
 - `EASYEDA_MCP_WS_HOST`
 - `EASYEDA_MCP_WS_PORT`
+- `EASYEDA_MCP_EXPORT_DIR`: where export tools write files (default `<os tmp>/easyeda-mcp-exports/`)
+
+Only one MCP server can use the bridge port at a time. See [Troubleshooting](./troubleshooting.md#bridge-port-is-used-by-another-process).
