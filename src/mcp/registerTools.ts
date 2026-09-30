@@ -1,10 +1,11 @@
 import * as z from "zod/v4";
-import type { EasyEdaBridge } from "../bridge/EasyEdaBridge.js";
+import type { BridgeClient } from "../bridge/types.js";
 import { ok, fail } from "./toolResult.js";
 import { isExportedFile, writeExport, type ExportKind } from "./exportFiles.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { PROTOCOL_VERSION, type EditorStatus } from "../protocol/messages.js";
 import { SERVER_VERSION } from "../version.js";
+import { buildRenderParams, isReadOnlyApiPath, isRenderedImage, movePcbComponent, mutationsAllowedByEnv } from "./liveOps.js";
 
 const DefaultTimeoutSchema = z.number().int().positive().max(120_000).default(10_000);
 const EndpointRefSchema = z.union([
@@ -78,6 +79,11 @@ const ConnectionCheckSchema = z.discriminatedUnion("type", [
   })
 ]);
 
+const PcbSnapshotIncludeSchema = z.enum(["components", "pads", "tracks", "vias", "arcs", "pours", "fills", "regions", "strings", "nets", "layers", "outline"]);
+const ApiPathSchema = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)+$/, "Use namespace.method, e.g. pcb_PrimitiveComponent.getAll");
+const RegionSchema = z.object({ left: z.number(), right: z.number(), top: z.number(), bottom: z.number() });
+const MUTATION_GATE_TEXT = "Mutating calls need confirmation exactly \"CONFIRM <gate>\" (case-insensitive), sent only after the user explicitly approved this change, unless the user started the server with EASYEDA_MCP_ALLOW_MUTATIONS=1.";
+
 const ConfirmedActionSchema = z.enum(["save", "importChanges", "autoroute", "autolayout"]);
 type ConfirmedAction = z.infer<typeof ConfirmedActionSchema>;
 
@@ -97,7 +103,7 @@ export function hasExplicitMutationConfirmation(confirmation: string, action: st
   return normalize(confirmation) === normalize(expectedConfirmationPhrase(action));
 }
 
-function confirmationRequired(action: ConfirmedAction, confirmation: string) {
+function confirmationRequired(action: ConfirmedAction | string, confirmation: string) {
   const expected = expectedConfirmationPhrase(action);
   const payload = {
     error: "confirmation_required",
@@ -114,7 +120,7 @@ function confirmationRequired(action: ConfirmedAction, confirmation: string) {
   };
 }
 
-export function registerEasyEdaTools(server: McpServer, bridge: EasyEdaBridge): void {
+export function registerEasyEdaTools(server: McpServer, bridge: BridgeClient): void {
   server.registerTool(
     "easyeda_live_status",
     {
@@ -129,7 +135,7 @@ export function registerEasyEdaTools(server: McpServer, bridge: EasyEdaBridge): 
       }
     },
     async () => {
-      const status = bridge.getStatus();
+      const status = await bridge.getStatus();
       const summary = status.connected
         ? status.compatibility?.compatible === false
           ? "EasyEDA Pro extension is connected, but its bridge protocol is incompatible."
@@ -156,7 +162,7 @@ export function registerEasyEdaTools(server: McpServer, bridge: EasyEdaBridge): 
       }
     },
     async () => {
-      const status = bridge.getStatus();
+      const status = await bridge.getStatus();
       const hasDocumentContext = Boolean(status.documentName || status.projectName || status.documentInfo);
       const nextSteps = doctorNextSteps(status);
       const summary = status.connected
@@ -172,7 +178,8 @@ export function registerEasyEdaTools(server: McpServer, bridge: EasyEdaBridge): 
             protocolVersion: PROTOCOL_VERSION
           },
           bridge: {
-            endpoint: bridge.endpoint
+            endpoint: bridge.endpoint,
+            ...bridge.describe?.()
           },
           extension: {
             connected: status.connected,
@@ -454,6 +461,155 @@ export function registerEasyEdaTools(server: McpServer, bridge: EasyEdaBridge): 
     }
   });
 
+  registerReadTool(server, bridge, {
+    name: "easyeda_pcb_snapshot",
+    title: "Get EasyEDA Pro PCB snapshot",
+    description: "Returns the active PCB as JSON in mil: components (primitiveId, designator, footprint, x, y, rotation, layer, locked), pads, tracks, vias, arcs, pours, fills, regions, strings, nets, layers, outline, and counts. Use include to fetch only some sections (faster, smaller).",
+    method: "pcbSnapshot",
+    inputSchema: {
+      include: z.array(PcbSnapshotIncludeSchema).min(1).optional().describe("Sections to return (default: all)."),
+      timeoutMs: DefaultTimeoutSchema.default(30_000)
+    },
+    summary: "Fetched EasyEDA Pro PCB snapshot."
+  });
+
+  registerReadTool(server, bridge, {
+    name: "easyeda_pcb_drc",
+    title: "Run EasyEDA Pro PCB DRC",
+    description: "Runs the design rule check on the active PCB and returns { ok, errorCount, categories } plus the raw Pro DRC tree. Does not modify the design.",
+    method: "pcbDrc",
+    inputSchema: {
+      strict: z.boolean().optional(),
+      verbose: z.boolean().optional(),
+      timeoutMs: DefaultTimeoutSchema.default(60_000)
+    },
+    summary: "Ran EasyEDA Pro DRC."
+  });
+
+  registerReadTool(server, bridge, {
+    name: "easyeda_api_describe",
+    title: "Describe EasyEDA Pro API",
+    description: "Lists the EasyEDA Pro API namespaces (dmt_, pcb_, sch_, lib_, pnl_) and their method names that easyeda_api_call can reach.",
+    method: "apiDescribe",
+    inputSchema: {
+      namespace: z.string().min(1).optional().describe("Only this namespace, e.g. pcb_PrimitiveComponent."),
+      timeoutMs: DefaultTimeoutSchema
+    },
+    summary: "Described the EasyEDA Pro API."
+  });
+
+  server.registerTool(
+    "easyeda_api_call",
+    {
+      title: "Call an EasyEDA Pro API method",
+      description: "Calls one EasyEDA Pro API method by path (namespace.method, namespaces dmt_/pcb_/sch_/lib_/pnl_ only) with JSON args and returns its JSON-plain result. " +
+        "Methods whose name starts with get/is/has/check/calculate/convert/discretize/describe are treated as read-only and run directly; every other method is treated as mutating. " +
+        MUTATION_GATE_TEXT.replace("<gate>", "api <path>") + " Example: \"CONFIRM api pcb_PrimitiveComponent.modify\". Use easyeda_api_describe to list methods.",
+      inputSchema: {
+        path: ApiPathSchema.describe("namespace.method, e.g. pcb_PrimitiveComponent.getAll"),
+        args: z.array(z.unknown()).default([]).describe("Positional arguments, as JSON values."),
+        confirmation: z.string().optional().describe("For mutating methods: exactly \"CONFIRM api <path>\", only after the user approved this change."),
+        timeoutMs: DefaultTimeoutSchema.default(30_000)
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: false
+      }
+    },
+    async ({ path, args, confirmation, timeoutMs }) => {
+      try {
+        const readOnly = isReadOnlyApiPath(path);
+        const gate = `api ${path}`;
+        if (!readOnly && !mutationsAllowedByEnv() && !hasExplicitMutationConfirmation(confirmation ?? "", gate)) {
+          return confirmationRequired(gate, confirmation ?? "");
+        }
+        const result = await bridge.call("apiCall", { path, args }, timeoutMs);
+        return ok(`Called ${path}.`, { path, readOnly, result });
+      } catch (error) {
+        return fail(error);
+      }
+    }
+  );
+
+  server.registerTool(
+    "easyeda_pcb_move_component",
+    {
+      title: "Move a PCB component",
+      description: "Moves/rotates/flips a component on the active PCB by designator (units: mil; layer top|bottom or a layer id) and returns its placement before and after (read back from EasyEDA). " +
+        "Use x/y for absolute or dx/dy for relative moves. " + MUTATION_GATE_TEXT.replace("<gate>", "move <designator>") + " Example: \"CONFIRM move U1\".",
+      inputSchema: {
+        designator: z.string().min(1),
+        x: z.number().optional(),
+        y: z.number().optional(),
+        dx: z.number().optional(),
+        dy: z.number().optional(),
+        rotation: z.number().optional(),
+        layer: z.union([z.enum(["top", "bottom"]), z.number().int()]).optional(),
+        confirmation: z.string().optional().describe("Exactly \"CONFIRM move <designator>\", only after the user approved this move."),
+        timeoutMs: DefaultTimeoutSchema.default(30_000)
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false
+      }
+    },
+    async ({ confirmation, timeoutMs, ...request }) => {
+      try {
+        const gate = `move ${request.designator}`;
+        if (!mutationsAllowedByEnv() && !hasExplicitMutationConfirmation(confirmation ?? "", gate)) {
+          return confirmationRequired(gate, confirmation ?? "");
+        }
+        const moved = await movePcbComponent(bridge, request, timeoutMs);
+        return ok(`Moved ${moved.designator}.`, { ...moved });
+      } catch (error) {
+        return fail(error);
+      }
+    }
+  );
+
+  server.registerTool(
+    "easyeda_render_view",
+    {
+      title: "Render EasyEDA Pro view as an image",
+      description: "Returns a PNG of the EasyEDA Pro canvas fitted to a component (designator, on the active PCB or schematic), a region (document units), or the current view. Does not modify the design, but it changes the editor view (zoom/pan).",
+      inputSchema: {
+        designator: z.string().min(1).optional(),
+        region: RegionSchema.optional().describe("left/right/top/bottom in document units."),
+        margin: z.number().min(0).max(10).optional().describe("Extra space around the target as a fraction of its bounding box (default 0.5)."),
+        timeoutMs: DefaultTimeoutSchema.default(30_000)
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false
+      }
+    },
+    async ({ timeoutMs, ...request }) => {
+      try {
+        const params = await buildRenderParams(bridge, request, timeoutMs);
+        const image = await bridge.call("renderImage", params, timeoutMs);
+        if (!isRenderedImage(image)) {
+          return ok("EasyEDA Pro did not return an image.", { result: image });
+        }
+        const info = { mimeType: image.mimeType, size: image.size, region: image.region, params };
+        return {
+          content: [
+            { type: "text" as const, text: `Rendered ${request.designator ?? (request.region ? "region" : "current view")} (${image.mimeType}, ${image.size ?? Math.round(image.base64.length * 0.75)} bytes).` },
+            { type: "image" as const, data: image.base64, mimeType: image.mimeType }
+          ],
+          structuredContent: info
+        };
+      } catch (error) {
+        return fail(error);
+      }
+    }
+  );
+
   server.registerTool(
     "easyeda_confirmed_action",
     {
@@ -538,7 +694,7 @@ type ExportToolConfig = {
   inputSchema: Record<string, z.ZodType>;
 };
 
-function registerExportTool(server: McpServer, bridge: EasyEdaBridge, config: ExportToolConfig): void {
+function registerExportTool(server: McpServer, bridge: BridgeClient, config: ExportToolConfig): void {
   server.registerTool(
     config.name,
     {
@@ -581,7 +737,7 @@ function registerExportTool(server: McpServer, bridge: EasyEdaBridge, config: Ex
 
 function registerReadTool(
   server: McpServer,
-  bridge: EasyEdaBridge,
+  bridge: BridgeClient,
   config: ReadToolConfig
 ): void {
   server.registerTool(

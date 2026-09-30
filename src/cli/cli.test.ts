@@ -1,0 +1,164 @@
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { BridgeHost } from "../bridge/BridgeHost.js";
+import { connectFakeExtension, silentLogger, waitFor } from "../bridge/fakeExtension.testutil.js";
+import { CliUsageError, joinNegativeNumbers, parseCli, parseJsonArg } from "./args.js";
+import { runCli } from "./main.js";
+
+const cleanups: Array<() => Promise<void> | void> = [];
+
+afterEach(async () => {
+  vi.unstubAllEnvs();
+  for (const cleanup of cleanups.splice(0).reverse()) {
+    await cleanup();
+  }
+});
+
+describe("CLI argument parsing", () => {
+  it("parses call args as JSON with a string fallback", () => {
+    expect(parseJsonArg("\"e12\"")).toBe("e12");
+    expect(parseJsonArg("{\"x\":100}")).toEqual({ x: 100 });
+    expect(parseJsonArg("12")).toBe(12);
+    expect(parseJsonArg("e12")).toBe("e12");
+    expect(parseCli(["call", "pcb_PrimitiveComponent.modify", "\"e12\"", "{\"x\":100}"]).command).toEqual({
+      name: "call",
+      path: "pcb_PrimitiveComponent.modify",
+      args: ["e12", { x: 100 }]
+    });
+  });
+
+  it("parses pcb move with negative numbers and layer names", () => {
+    expect(joinNegativeNumbers(["pcb", "move", "U1", "--dx", "-50", "--", "-3"])).toEqual(["pcb", "move", "U1", "--dx=-50", "--", "-3"]);
+    const invocation = parseCli(["pcb", "move", "U1", "--dx", "-50", "--y", "20.5", "--layer", "bottom", "--rotation", "90"]);
+    expect(invocation.command).toEqual({ name: "pcb-move", request: { designator: "U1", dx: -50, y: 20.5, rotation: 90, layer: "bottom" } });
+    expect(invocation.start).toBe(true);
+  });
+
+  it("rejects bad or inapplicable options with a usage error", () => {
+    const bad = [
+      ["pcb", "move", "U1"],
+      ["pcb", "move", "U1", "--x", "1", "--dx", "2"],
+      ["pcb", "move", "U1", "--x", "abc"],
+      ["pcb", "move", "U1", "--layer", "middle"],
+      ["pcb", "snapshot", "--include", "components,bogus"],
+      ["pcb", "drc", "--out", "x"],
+      ["export", "gerber", "--format", "csv"],
+      ["export", "zip"],
+      ["render"],
+      ["render", "--out", "a.png", "--region", "1,2"],
+      ["status", "--start", "--no-start"],
+      ["frobnicate"]
+    ];
+    for (const argv of bad) {
+      expect(() => parseCli(argv), argv.join(" ")).toThrow(CliUsageError);
+    }
+  });
+
+  it("defaults --start on only for commands that talk to EasyEDA", () => {
+    expect(parseCli(["status"]).start).toBe(false);
+    expect(parseCli(["stop"]).start).toBe(false);
+    expect(parseCli(["pcb", "drc"]).start).toBe(true);
+    expect(parseCli(["pcb", "drc", "--no-start"]).start).toBe(false);
+    expect(parseCli(["status", "--start"]).start).toBe(true);
+  });
+
+  it("parses snapshot, export and render options", () => {
+    expect(parseCli(["pcb", "snapshot", "--include", "components,tracks", "--out", "s.json", "--pretty"])).toMatchObject({
+      command: { name: "pcb-snapshot", include: ["components", "tracks"], out: "s.json" },
+      pretty: true
+    });
+    expect(parseCli(["export", "bom"]).command).toEqual({ name: "export", kind: "bom", format: "csv", overwrite: false });
+    expect(parseCli(["render", "--designator", "U1", "--margin", "1", "-o", "v.png"]).command).toEqual({ name: "render", designator: "U1", margin: 1, out: "v.png" });
+  });
+});
+
+describe("CLI against an in-process hub", () => {
+  async function setup() {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "easyeda-cli-"));
+    cleanups.push(() => rm(dir, { recursive: true, force: true }));
+    vi.stubEnv("EASYEDA_MCP_CONFIG_DIR", dir);
+    vi.stubEnv("EASYEDA_MCP_HTTP_PORT", "");
+    let stopRequested = false;
+    const host = new BridgeHost({ role: "daemon", wsPort: 0, httpPort: 0, configDir: dir, logger: silentLogger, onShutdownRequest: () => {
+      stopRequested = true;
+      void host.stop();
+    } });
+    await host.start();
+    cleanups.push(() => host.stop());
+    const components = new Map([["e12", { primitiveId: "e12", designator: "U1", x: 100, y: 200, rotation: 0, layer: 1 }]]);
+    const calls: Array<{ method: string; params: unknown }> = [];
+    const fake = await connectFakeExtension(host.endpoint, (method, params) => {
+      calls.push({ method, params });
+      const p = params as { path?: string; args?: unknown[] };
+      if (method === "pcbSnapshot") return { components: [...components.values()], counts: { components: components.size } };
+      if (p?.path === "pcb_PrimitiveComponent.modify") {
+        const [id, props] = p.args as [string, object];
+        Object.assign(components.get(id)!, props);
+        return components.get(id);
+      }
+      if (p?.path === "pcb_PrimitiveComponent.get") return components.get(String(p.args?.[0]));
+      if (method === "apiBatch") return { results: [{ ok: true, value: 1 }, { ok: false, error: { code: "x", message: "boom" } }] };
+      return { method, params };
+    });
+    cleanups.push(() => fake.close());
+    return { dir, host, calls, isStopRequested: () => stopRequested };
+  }
+
+  async function run(argv: string[], stdin = "") {
+    let stdout = "";
+    let stderr = "";
+    const code = await runCli(argv, { stdout: (text) => { stdout += text; }, stderr: (text) => { stderr += text; }, readStdin: async () => stdin });
+    return { code, stdout, stderr, json: stdout ? JSON.parse(stdout) : undefined };
+  }
+
+  it("runs status, call, pcb move, snapshot --out, batch and stop", async () => {
+    const { dir, calls, isStopRequested } = await setup();
+
+    const status = await run(["status"]);
+    expect(status.code).toBe(0);
+    expect(status.json).toMatchObject({ hub: { role: "daemon" }, status: { connected: true } });
+
+    const call = await run(["call", "pcb_PrimitiveComponent.getAll", "--no-start"]);
+    expect(call.json).toEqual({ method: "apiCall", params: { path: "pcb_PrimitiveComponent.getAll", args: [] } });
+
+    const move = await run(["pcb", "move", "u1", "--dy", "-25", "--no-start"]);
+    expect(move.code).toBe(0);
+    expect(move.json).toMatchObject({ primitiveId: "e12", before: { y: 200 }, after: { y: 175 } });
+    expect(calls).toContainEqual({ method: "apiCall", params: { path: "pcb_PrimitiveComponent.modify", args: ["e12", { y: 175 }] } });
+
+    const out = path.join(dir, "snap.json");
+    const snapshot = await run(["pcb", "snapshot", "--include", "components", "--out", out]);
+    expect(snapshot.json).toMatchObject({ path: out, counts: { components: 1 } });
+    expect(JSON.parse(await readFile(out, "utf8")).components[0].designator).toBe("U1");
+
+    const batchFile = path.join(dir, "batch.json");
+    await writeFile(batchFile, JSON.stringify([{ path: "pcb_A.getAll" }, { path: "pcb_B.getAll" }]));
+    const batch = await run(["batch", batchFile]);
+    expect(batch.code).toBe(1);
+    expect(calls.at(-1)).toEqual({ method: "apiBatch", params: { calls: [{ path: "pcb_A.getAll" }, { path: "pcb_B.getAll" }], stopOnError: true } });
+    await run(["batch", "-", "--continue-on-error"], "[{\"path\":\"pcb_A.getAll\"}]");
+    expect(calls.at(-1)?.params).toMatchObject({ stopOnError: false });
+
+    const missing = await run(["pcb", "move", "R7", "--x", "0"]);
+    expect(missing.code).toBe(1);
+    expect(JSON.parse(missing.stderr)).toMatchObject({ ok: false, error: { code: "component_not_found" } });
+
+    const stop = await run(["stop"]);
+    expect(stop.json).toMatchObject({ stopped: true, pid: process.pid });
+    await waitFor(() => isStopRequested());
+  });
+
+  it("reports a missing hub without starting one when --no-start is given", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "easyeda-cli-empty-"));
+    cleanups.push(() => rm(dir, { recursive: true, force: true }));
+    vi.stubEnv("EASYEDA_MCP_CONFIG_DIR", dir);
+    const status = await run(["status"]);
+    expect(status.code).toBe(1);
+    expect(status.json).toMatchObject({ hub: null });
+    const call = await run(["call", "pcb_X.getAll", "--no-start"]);
+    expect(call.code).toBe(1);
+    expect(JSON.parse(call.stderr)).toMatchObject({ error: { code: "hub_not_running" } });
+  });
+});

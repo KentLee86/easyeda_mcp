@@ -1,7 +1,6 @@
 import process from "node:process";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import type { EasyEdaBridge } from "./bridge/EasyEdaBridge.js";
 
 type ProcessLike = {
   exit(code?: number): never;
@@ -14,9 +13,11 @@ type ProcessLike = {
 };
 
 type LifecycleOptions = {
-  bridge: EasyEdaBridge;
-  server: McpServer;
-  transport: StdioServerTransport;
+  /** Stopping the bridge sends {kind:"bye"} to the extension and releases the port. */
+  bridge: { stop(): Promise<void> };
+  /** MCP stdio server; omitted for the daemon, which then ignores stdin. */
+  server?: Pick<McpServer, "close">;
+  transport?: Pick<StdioServerTransport, "close">;
   processRef?: ProcessLike;
   exitOnShutdown?: boolean;
 };
@@ -36,9 +37,10 @@ export function installLifecycleHandlers(options: LifecycleOptions): { shutdown:
     if (!shutdownPromise) {
       detach();
       shutdownPromise = (async () => {
+        // bridge.stop() awaits the bye message before closing the socket.
         await Promise.allSettled([
-          server.close(),
-          transport.close(),
+          server?.close(),
+          transport?.close(),
           bridge.stop()
         ]);
       })().finally(() => {
@@ -68,8 +70,10 @@ export function installLifecycleHandlers(options: LifecycleOptions): { shutdown:
 
   processRef.once("SIGINT", onSignal);
   processRef.once("SIGTERM", onSignal);
-  processRef.stdin.once("end", onStdinClosed);
-  processRef.stdin.once("close", onStdinClosed);
+  if (transport) {
+    processRef.stdin.once("end", onStdinClosed);
+    processRef.stdin.once("close", onStdinClosed);
+  }
 
   return { shutdown };
 }

@@ -54,3 +54,18 @@ describe("installLifecycleHandlers", () => {
     });
   });
 });
+
+describe("installLifecycleHandlers (daemon)", () => {
+  it("ignores stdin without an MCP transport and stops the bridge on SIGTERM", async () => {
+    const processRef = new MockProcess();
+    const bridge = { stop: vi.fn().mockResolvedValue(undefined) };
+    installLifecycleHandlers({ bridge, processRef, exitOnShutdown: false });
+
+    processRef.stdin.emit("end");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(bridge.stop).not.toHaveBeenCalled();
+
+    processRef.emit("SIGTERM");
+    await vi.waitFor(() => expect(bridge.stop).toHaveBeenCalledTimes(1));
+  });
+});

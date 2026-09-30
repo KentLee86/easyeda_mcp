@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { WebSocketServer, WebSocket } from "ws";
 import {
+  type BridgeByeMessage,
   type BridgeCallMessage,
   type ClientToServerMessage,
   createDisconnectedStatus,
@@ -9,6 +10,7 @@ import {
   parseClientMessage
 } from "../protocol/messages.js";
 import { BridgeProtocolCompatibilityError, BridgeRpcError, BridgeTimeoutError, BridgeUnavailableError } from "./errors.js";
+import type { BridgeClient } from "./types.js";
 
 type PendingCall = {
   method: string;
@@ -25,7 +27,7 @@ export type EasyEdaBridgeOptions = {
   portRetryMs?: number;
 };
 
-export class EasyEdaBridge {
+export class EasyEdaBridge implements BridgeClient {
   private readonly host: string;
   private readonly port: number;
   private readonly logger: Pick<Console, "error" | "warn" | "info">;
@@ -51,6 +53,35 @@ export class EasyEdaBridge {
 
   getStatus(): EditorStatus {
     return this.status;
+  }
+
+  /** Port actually bound (differs from the configured one when it was 0), or undefined. */
+  get boundPort(): number | undefined {
+    const address = this.wss?.address();
+    return typeof address === "object" && address ? address.port : undefined;
+  }
+
+  get listening(): boolean {
+    return this.wss !== undefined;
+  }
+
+  /**
+   * Bind the WebSocket port once. Resolves false when another process holds
+   * it (no retry loop; BridgeHost decides what to do then).
+   */
+  async tryListen(): Promise<boolean> {
+    if (this.wss) {
+      return true;
+    }
+    try {
+      await this.listen();
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EADDRINUSE") {
+        return false;
+      }
+      throw error;
+    }
   }
 
   async start(): Promise<void> {
@@ -99,6 +130,7 @@ export class EasyEdaBridge {
       this.retryTimer = undefined;
     }
     this.rejectAll(new BridgeUnavailableError("EasyEDA Pro bridge is stopping."));
+    await this.sendBye();
     this.socket?.close();
     await new Promise<void>((resolve, reject) => {
       if (!this.wss) {
@@ -243,6 +275,22 @@ export class EasyEdaBridge {
       this.pending.delete(message.requestId);
       pending.reject(new BridgeRpcError(message.error.message, message.error.code, message.error.details));
     }
+  }
+
+  /** Tell the extension we are going away so it reconnects without waiting for its watchdog. */
+  private async sendBye(timeoutMs = 500): Promise<void> {
+    const socket = this.socket;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    const message: BridgeByeMessage = { kind: "bye", at: new Date().toISOString(), reason: "server_shutdown" };
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, timeoutMs);
+      socket.send(JSON.stringify(message), () => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
   }
 
   private ack(): void {

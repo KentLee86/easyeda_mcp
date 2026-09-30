@@ -30,7 +30,8 @@
     "README.md"
   ],
   "bin": {
-    "easyeda-pro-mcp": "dist/index.js"
+    "easyeda-pro-mcp": "dist/index.js",
+    "easyeda": "dist/cli/index.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
@@ -43,7 +44,9 @@
     "package:all": "npm run build && npm run build:extension && npm run package:extension",
     "setup:local": "npm run package:all",
     "test": "vitest run",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "cli": "node dist/cli/index.js",
+    "test:python": "PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s clients/python -p 'test_*.py'"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

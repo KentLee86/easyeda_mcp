@@ -18,6 +18,8 @@ export type BridgeCapabilities = {
   pcbManufactureData: boolean;
   schManufactureData: boolean;
   fileSystem: boolean;
+  /** Extension exposes apiCall/apiBatch/apiDescribe/pcbSnapshot/pcbDrc. */
+  apiCall: boolean;
 };
 
 export type EditorStatus = {
@@ -94,7 +96,17 @@ export type BridgeAckMessage = {
   at: string;
 };
 
-export type ServerToClientMessage = BridgeCallMessage | BridgeAckMessage;
+/**
+ * Sent when the bridge owner shuts down, so the extension reconnects right away
+ * instead of waiting for its liveness watchdog.
+ */
+export type BridgeByeMessage = {
+  kind: "bye";
+  at: string;
+  reason?: string;
+};
+
+export type ServerToClientMessage = BridgeCallMessage | BridgeAckMessage | BridgeByeMessage;
 
 export type RpcErrorPayload = BridgeErrorMessage["error"];
 

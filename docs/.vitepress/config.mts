@@ -31,6 +31,7 @@ export default defineConfig({
         text: "Reference",
         items: [
           { text: "Tools Reference", link: "/tools" },
+          { text: "CLI, HTTP Hub, and Python", link: "/cli" },
           { text: "Architecture", link: "/architecture" },
           { text: "Safety Model", link: "/safety" },
           { text: "Troubleshooting", link: "/troubleshooting" }

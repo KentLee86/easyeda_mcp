@@ -11,3 +11,5 @@ docs/.vitepress/cache/
 .agents/
 PROJECT_MEMORY.md
 prompt-home-3d.md
+__pycache__/
+*.pyc

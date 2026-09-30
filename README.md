@@ -95,6 +95,20 @@ Core capabilities:
 - [Tools Reference](https://vlabsoft.org/easyeda_mcp/tools): available MCP tools
 - [Troubleshooting](https://vlabsoft.org/easyeda_mcp/troubleshooting): fixes by symptom
 
+## CLI
+
+The same bridge can be driven from the shell, scripts, or Python without an AI client:
+
+```bash
+easyeda status
+easyeda pcb snapshot --include components --out board.json
+easyeda pcb move U1 --dx 50 --rotation 90
+easyeda call pcb_PrimitiveComponent.getAll
+easyeda pcb drc
+```
+
+`easyeda` talks to a local hub (HTTP on `127.0.0.1:8766`, bearer token in `~/.config/easyeda-mcp/token`) served by the running MCP server or a background daemon it starts on demand. Several MCP servers can share one extension connection. See [CLI, HTTP hub, and Python client](./docs/cli.md) for commands, the HTTP API, the Python client in `clients/python/`, and the security model.
+
 ## Releases
 
 Download packaged extension builds from [GitHub Releases](https://github.com/VLab-Software/easyeda_mcp/releases). Local builds also create `build/dist/easyeda_mcp_bridge.eext`.

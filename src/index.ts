@@ -1,11 +1,19 @@
 #!/usr/bin/env node
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { EasyEdaBridge } from "./bridge/EasyEdaBridge.js";
+import { BridgeHost } from "./bridge/BridgeHost.js";
+import { runDaemon } from "./daemon.js";
 import { installLifecycleHandlers } from "./lifecycle.js";
 import { createMcpServer } from "./mcp/server.js";
 
 async function main(): Promise<void> {
-  const bridge = new EasyEdaBridge();
+  if (process.argv[2] === "daemon") {
+    await runDaemon();
+    return;
+  }
+
+  // Owns the bridge port (and serves the hub HTTP API), or proxies to the
+  // process that does.
+  const bridge = new BridgeHost({ role: "mcp" });
   await bridge.start();
 
   const server = createMcpServer(bridge);
