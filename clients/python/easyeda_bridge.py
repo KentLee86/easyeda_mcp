@@ -243,6 +243,25 @@ class Bridge:
         """DRC + schematic-vs-PCB netlist comparison + unconnected pins. report["ok"] is the verdict."""
         return self._request("POST", "/v1/ops/check", {"strict": strict}, timeout_s=600)["result"]
 
+    def analyze(self, top: int = 10, grid: Optional[float] = None, pad_bbox: bool = False,
+                out: Optional[os.PathLike] = None) -> dict:
+        """PCB placement/routing analysis (board size, density, overlaps, spacing,
+        per-net length/vias, possibly-unrouted nets). report["ok"] is False when
+        there are warnings or errors. The hub switches to the PCB and back.
+        `out` also writes the report as JSON.
+        """
+        body: dict = {"top": top}
+        if grid is not None:
+            body["grid"] = grid
+        if pad_bbox:
+            body["padBBox"] = True
+        report = self._request("POST", "/v1/ops/pcb-analyze", body, timeout_s=600)["result"]
+        if out is not None:
+            target = pathlib.Path(out)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+        return report
+
     def describe(self, namespace: Optional[str] = None) -> dict:
         return self.call("apiDescribe", {"namespace": namespace} if namespace else {})
 

@@ -14,6 +14,7 @@ export type CliCommand =
   | { name: "pcb-snapshot"; include?: string[]; out?: string }
   | { name: "pcb-move"; request: MoveRequest }
   | { name: "pcb-drc"; strict?: boolean; verbose?: boolean }
+  | { name: "pcb-analyze"; json: boolean; top?: number; out?: string; grid?: number; padBBox: boolean }
   | { name: "sch-snapshot"; out?: string }
   | { name: "export"; kind: string; out?: string; format?: string; scope?: "pcb" | "schematic" | "auto"; overwrite: boolean }
   | { name: "export-list" }
@@ -63,7 +64,10 @@ const OPTIONS = {
   preset: { type: "string" },
   zip: { type: "boolean" },
   "drc-gate": { type: "boolean" },
-  json: { type: "boolean" }
+  json: { type: "boolean" },
+  top: { type: "string" },
+  grid: { type: "string" },
+  "pad-bbox": { type: "boolean" }
 } as const;
 
 type OptionName = keyof typeof OPTIONS;
@@ -79,6 +83,7 @@ const COMMAND_OPTIONS: Record<CliCommand["name"], OptionName[]> = {
   "pcb-snapshot": ["include", "out"],
   "pcb-move": ["x", "y", "dx", "dy", "rotation", "layer"],
   "pcb-drc": ["strict", "verbose"],
+  "pcb-analyze": ["json", "top", "out", "grid", "pad-bbox"],
   "sch-snapshot": ["out"],
   export: ["out", "format", "scope", "overwrite"],
   "export-list": ["list"],
@@ -345,8 +350,23 @@ function buildPcb(positionals: string[], values: Values): CliCommand {
     case "drc":
       noExtra(positionals, 2);
       return { name: "pcb-drc", ...(values.strict ? { strict: true } : {}), ...(values.verbose ? { verbose: true } : {}) };
+    case "analyze": {
+      noExtra(positionals, 2);
+      const top = numberOption(values, "top");
+      if (top !== undefined && (!Number.isInteger(top) || top < 1)) throw new CliUsageError("--top must be a positive integer.");
+      const grid = numberOption(values, "grid");
+      if (grid !== undefined && grid <= 0) throw new CliUsageError("--grid must be positive (mil).");
+      return {
+        name: "pcb-analyze",
+        json: values.json ?? false,
+        padBBox: values["pad-bbox"] ?? false,
+        ...(top === undefined ? {} : { top }),
+        ...(grid === undefined ? {} : { grid }),
+        ...(values.out ? { out: values.out } : {})
+      };
+    }
     default:
-      throw new CliUsageError(`Unknown pcb command "${sub ?? ""}". Use snapshot, move, or drc.`);
+      throw new CliUsageError(`Unknown pcb command "${sub ?? ""}". Use snapshot, move, drc, or analyze.`);
   }
 }
 
@@ -362,6 +382,8 @@ Usage:
   easyeda pcb snapshot [--include a,b] [--out file]
   easyeda pcb move <designator> [--x N] [--y N] [--dx N] [--dy N] [--rotation N] [--layer top|bottom|N]
   easyeda pcb drc [--strict] [--verbose]
+  easyeda pcb analyze [--json] [--top N] [--out file] [--grid mil] [--pad-bbox]
+                                          Placement/routing report (exit 0 clean, 1 warnings/errors, 2 error)
   easyeda sch snapshot [--out file]
   easyeda export <kind> [--out path] [--format csv|json|xlsx] [--scope pcb|schematic] [--overwrite]
   easyeda export --list                   All export kinds (gerber, step, pnp, bom, ibom, odb, ...)

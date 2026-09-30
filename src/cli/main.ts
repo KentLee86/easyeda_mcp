@@ -7,6 +7,8 @@ import { resolveExportTarget } from "../mcp/exportFiles.js";
 import { describeCatalog } from "../mcp/exportCatalog.js";
 import { collectPackage, exportKind, formatDesignCheck, runDesignCheck, writePackage } from "../mcp/exportOps.js";
 import { buildRenderParams, isRenderedImage, movePcbComponent } from "../mcp/liveOps.js";
+import { formatPcbAnalysis } from "../pcb/analyze.js";
+import { runPcbAnalyze } from "../pcb/analyzeOps.js";
 import { CliUsageError, parseCli, USAGE, type CliCommand, type CliInvocation } from "./args.js";
 import { connectHub, findHub } from "./hub.js";
 
@@ -60,8 +62,8 @@ export async function runCli(argv: string[], io: CliIo = defaultIo): Promise<num
       ? { code: "usage", message: `${error.message}\nRun easyeda --help for usage.` }
       : errorToWire(error).error;
     io.stderr(`${JSON.stringify({ ok: false, error: wire }, null, invocation?.pretty ? 2 : undefined)}\n`);
-    // `check` reserves 1 for findings, so errors are 2 there.
-    return error instanceof CliUsageError || invocation?.command.name === "check" ? 2 : 1;
+    // `check` and `pcb analyze` reserve 1 for findings, so errors are 2 there.
+    return error instanceof CliUsageError || invocation?.command.name === "check" || invocation?.command.name === "pcb-analyze" ? 2 : 1;
   }
 }
 
@@ -155,6 +157,18 @@ export async function runEditorCommand(
     case "check": {
       const report = await runDesignCheck(bridge, { strict: command.strict });
       return { output: report, ...(command.json ? {} : { text: formatDesignCheck(report) }), exitCode: report.ok ? 0 : 1 };
+    }
+    case "pcb-analyze": {
+      // Switches to the PCB (useDocument) and back.
+      const report = await runPcbAnalyze(bridge, { top: command.top, grid: command.grid, bboxes: !command.padBBox, ...(timeoutMs ? { timeoutMs } : {}) });
+      let written: string | undefined;
+      if (command.out) {
+        written = path.resolve(command.out);
+        await mkdir(path.dirname(written), { recursive: true });
+        await writeFile(written, `${JSON.stringify(report, null, 2)}\n`);
+      }
+      const text = formatPcbAnalysis(report, command.top ?? 10) + (written ? `Report: ${written}\n` : "");
+      return { output: report, ...(command.json ? {} : { text }), exitCode: report.ok ? 0 : 1 };
     }
     case "render": {
       const params = await buildRenderParams(bridge, command, timeoutMs ?? 30_000);

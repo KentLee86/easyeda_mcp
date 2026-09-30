@@ -10,6 +10,8 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { PROTOCOL_VERSION, type EditorStatus } from "../protocol/messages.js";
 import { SERVER_VERSION } from "../version.js";
 import { buildRenderParams, isReadOnlyApiPath, isRenderedImage, movePcbComponent, mutationsAllowedByEnv } from "./liveOps.js";
+import { formatPcbAnalysis } from "../pcb/analyze.js";
+import { runPcbAnalyze } from "../pcb/analyzeOps.js";
 
 const DefaultTimeoutSchema = z.number().int().positive().max(120_000).default(10_000);
 const EndpointRefSchema = z.union([
@@ -723,6 +725,34 @@ export function registerEasyEdaTools(server: McpServer, bridge: BridgeClient): v
       try {
         const report = await runDesignCheck(bridge, { strict });
         return ok(formatDesignCheck(report).trimEnd(), { report });
+      } catch (error) {
+        return fail(error);
+      }
+    }
+  );
+
+  server.registerTool(
+    "easyeda_pcb_analyze",
+    {
+      title: "Analyze PCB placement and routing",
+      description: "Reads the PCB (snapshot + component boxes) and reports board size/area/layers, per-side placement density, parts outside the outline, same-side overlaps, closest part pairs, per-net track length/segments/vias/layers/widths, and nets whose pads are not all joined by copper (tracks, vias, pours by outline). Units mil. " +
+        "Does not change the design; it switches the editor to the PCB if needed and then back to the original document.",
+      inputSchema: {
+        top: z.number().int().positive().max(200).default(10).describe("Entries in the closest-pairs and longest-nets lists."),
+        grid: z.number().positive().optional().describe("Also report parts whose origin is off this grid (mil), as info."),
+        padBBox: z.boolean().default(false).describe("Use pad extents as component boxes instead of pcb_Primitive.getPrimitivesBBox (which may include silkscreen).")
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false
+      }
+    },
+    async ({ top, grid, padBBox }) => {
+      try {
+        const report = await runPcbAnalyze(bridge, { top, grid, bboxes: !padBBox });
+        return ok(formatPcbAnalysis(report, top).trimEnd(), { report });
       } catch (error) {
         return fail(error);
       }

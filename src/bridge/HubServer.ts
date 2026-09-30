@@ -6,6 +6,7 @@ import type { BridgeClient } from "./types.js";
 import { HUB_HOST } from "./config.js";
 import { describeCatalog } from "../mcp/exportCatalog.js";
 import { collectPackage, exportKind, runDesignCheck } from "../mcp/exportOps.js";
+import { runPcbAnalyze } from "../pcb/analyzeOps.js";
 
 export const MAX_BODY_BYTES = 16 * 1024 * 1024;
 export const MAX_CALL_TIMEOUT_MS = 600_000;
@@ -123,6 +124,7 @@ export class HubServer {
         case "POST /v1/ops/export":
         case "POST /v1/ops/package":
         case "POST /v1/ops/check":
+        case "POST /v1/ops/pcb-analyze":
           await this.handleOps(url.pathname.slice("/v1/ops/".length), request, response);
           return;
         case "POST /v1/shutdown":
@@ -134,7 +136,7 @@ export class HubServer {
           setImmediate(() => this.options.onShutdown?.());
           return;
         default:
-          if (["/v1/status", "/v1/hub", "/v1/call", "/v1/shutdown", "/v1/exports", "/v1/ops/export", "/v1/ops/package", "/v1/ops/check"].includes(url.pathname)) {
+          if (["/v1/status", "/v1/hub", "/v1/call", "/v1/shutdown", "/v1/exports", "/v1/ops/export", "/v1/ops/package", "/v1/ops/check", "/v1/ops/pcb-analyze"].includes(url.pathname)) {
             throw new HttpError(405, "method_not_allowed", `${request.method} is not allowed on ${url.pathname}.`);
           }
           throw new HttpError(404, "not_found", `Unknown endpoint ${url.pathname}.`);
@@ -216,6 +218,18 @@ export class HubServer {
       } else if (operation === "package") {
         const collected = await collectPackage(this.options.bridge, { kinds: strings(input.kinds), preset: text(input.preset) });
         result = { manifest: collected.manifest, files: collected.files.map((file) => ({ kind: file.kind, fileName: file.fileName, size: file.data.length, base64: file.data.toString("base64") })) };
+      } else if (operation === "pcb-analyze") {
+        const positive = (value: unknown, name: string) => {
+          if (value === undefined || value === null) return undefined;
+          if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) throw new HttpError(400, "bad_request", `"${name}" must be a positive number.`);
+          return value;
+        };
+        const top = positive(input.top, "top");
+        result = await runPcbAnalyze(this.options.bridge, {
+          ...(top === undefined ? {} : { top: Math.floor(top) }),
+          grid: positive(input.grid, "grid"),
+          bboxes: input.padBBox !== true
+        });
       } else {
         result = await runDesignCheck(this.options.bridge, { strict: input.strict === true });
       }

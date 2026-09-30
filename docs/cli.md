@@ -60,6 +60,7 @@ easyeda export bom --format json --out bom.json --overwrite
 easyeda package --preset fab --zip --drc-gate
 easyeda package --kinds gerber,pnp,bom,step --out ./release
 easyeda check                        # exit 0 clean, 1 findings, 2 error
+easyeda pcb analyze --top 5 --out analysis.json   # exit 0 clean, 1 warnings/errors, 2 error
 easyeda render --designator U1 --out u1.png
 easyeda render --region 0,2000,0,1500 --margin 0.2 --out area.png
 easyeda daemon                      # foreground bridge + hub
@@ -157,6 +158,38 @@ fiducials) are informational. Text by default, `--json` for the full report,
 The comparison lives in `src/schematic/compareNetlist.ts`, which
 `dev/live/compare-netlist.mjs` also uses.
 
+**`easyeda pcb analyze`** is an offline-style placement and routing report built
+from one `pcbSnapshot` plus one `apiBatch` (per-component
+`pcb_Primitive.getPrimitivesBBox`, the copper layer count, and board-outline
+polylines when the snapshot has no `outline`). It switches to the PCB if a
+schematic is active and restores the original document. It reports:
+
+- board: outline box, size in mil and mm, area, copper layers, counts
+  (`outlineSource` is `outline`, `board-outline-layer`, or `estimated` from the
+  part/copper extents, in which case the outside-board check is skipped);
+- placement: per component side, position, rotation, box size and nearest
+  same-side neighbour (edge-to-edge); per-side density (sum of box areas / board
+  area); the `--top N` closest pairs;
+- findings: pads outside the outline (error), body box outside (warning),
+  same-side overlaps (warning when pad areas overlap or both boxes come from pads;
+  info when one part has no connected pads or only EasyEDA's body boxes, which
+  may include silkscreen, overlap), rotation not a multiple of 90 (info), off-grid
+  origins with `--grid <mil>` (info);
+- routing per net: track length (lines + arcs), segments, vias, layers,
+  min/max width, EasyEDA's own net length for comparison, and
+  `possibly-unrouted` nets whose pads fall into more than one copper-connected
+  group (the groups are listed).
+
+Connectivity assumptions: items of one net connect when their copper overlaps
+within 0.5 mil on a shared layer; vias and multi-layer (through-hole) pads join
+every layer; a pour joins whatever of its net touches the pour *outline* on its
+layer. The poured copper is smaller than the outline (clearances, removed
+islands), so a net can be reported routed when an island was removed, but a
+routed net is not reported open. Pad rotation is read as radians, component
+rotation as degrees. `--pad-bbox` uses pad extents as boxes instead of EasyEDA's
+body boxes. Text by default, `--json` for the full report, `--out` also writes
+the JSON report. The analysis is `src/pcb/analyze.ts` (pure, takes a snapshot).
+
 ## HTTP API
 
 Served by the bridge owner on `127.0.0.1:${EASYEDA_MCP_HTTP_PORT:-8766}`.
@@ -173,6 +206,7 @@ Every request needs `Authorization: Bearer <token>`.
 | `POST /v1/ops/export` `{kind, format?, scope?}` | `{kind, fileName, mimeType, size, ms, base64, ...}`; the hub switches documents and back. |
 | `POST /v1/ops/package` `{kinds?, preset?}` | `{manifest, files: [{kind, fileName, size, base64}]}`; the client writes the folder/zip. |
 | `POST /v1/ops/check` `{strict?}` | The design check report (`ok`, `findings`, `drc`, `connectivity`, `unconnectedPins`, ...). |
+| `POST /v1/ops/pcb-analyze` `{top?, grid?, padBBox?}` | The `pcb analyze` report (`ok`, `board`, `placement`, `routing`, `findings`, `summary`, `documents`). |
 
 `method` is any bridge method the extension implements: `apiCall`
 (`{path, args}`), `apiBatch` (`{calls, stopOnError}`), `apiDescribe`,
@@ -211,9 +245,10 @@ eda.render(designator="U1", out="u1.png")
 eda.export("step", out="out/")                  # any catalog kind
 eda.package(preset="fab", zip=True)             # folder + manifest.json (+ zip)
 report = eda.check()                             # report["ok"], report["findings"]
+analysis = eda.analyze(top=5, out="analysis.json")  # analysis["routing"]["possiblyUnrouted"]
 ```
 
-`export`, `package`, and `check` run in the hub (same catalog and logic as the
+`export`, `package`, `check`, and `analyze` run in the hub (same catalog and logic as the
 CLI); files come back base64 and the client writes them. See `clients/python/README.md` and `clients/python/example_move.py`. Tests run
 against a fake hub: `npm run test:python`.
 
@@ -230,6 +265,7 @@ against a fake hub: `npm run test:python`.
 | `easyeda_export` | writes a file, switches documents (and back) |
 | `easyeda_package` | writes a folder (+ zip), switches documents (and back) |
 | `easyeda_design_check` | does not change the design; switches documents (and back) |
+| `easyeda_pcb_analyze` | does not change the design; switches to the PCB (and back) |
 
 Gated tools need `confirmation` exactly `CONFIRM api <path>` (for example
 `CONFIRM api pcb_PrimitiveComponent.modify`) or `CONFIRM move <designator>`

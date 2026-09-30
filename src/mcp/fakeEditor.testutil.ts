@@ -5,7 +5,16 @@ import { BridgeRpcError } from "../bridge/errors.js";
 export const DOCS = { sch: { uuid: "sch1", documentType: 1, name: "Main" }, pcb: { uuid: "pcb1", documentType: 3, name: "Board" } };
 
 /** Fake extension: tracks the active document and refuses exports for the wrong one. */
-export function fakeEditor(options: { failPaths?: string[]; drcErrors?: number; enet?: unknown; schematic?: unknown } = {}) {
+export function fakeEditor(options: {
+  failPaths?: string[];
+  drcErrors?: number;
+  enet?: unknown;
+  schematic?: unknown;
+  /** Full pcbSnapshot result (default: counts only). */
+  pcb?: unknown;
+  /** getPrimitivesBBox answers by primitive id, for apiBatch. */
+  bboxes?: Record<string, unknown>;
+} = {}) {
   let current: { uuid: string; documentType: number; name: string } = DOCS.sch;
   const log: string[] = [];
   const call = async (method: string, params?: unknown): Promise<unknown> => {
@@ -41,7 +50,26 @@ export function fakeEditor(options: { failPaths?: string[]; drcErrors?: number; 
       if (current.uuid !== "pcb1") throw new BridgeRpcError("drc needs pcb", "unsupported_document");
       return { ok: (options.drcErrors ?? 0) === 0, errorCount: options.drcErrors ?? 0, categories: [] };
     }
-    if (method === "pcbSnapshot") return { counts: { components: 2, nets: 1 } };
+    if (method === "pcbSnapshot") {
+      if (options.pcb === undefined) return { counts: { components: 2, nets: 1 } };
+      log.push("pcbSnapshot");
+      if (current.uuid !== "pcb1") throw new BridgeRpcError("needs pcb", "unsupported_document");
+      return options.pcb;
+    }
+    if (method === "apiBatch") {
+      log.push("apiBatch");
+      const calls = (p.calls ?? []) as Array<{ path: string; args?: unknown[] }>;
+      return {
+        results: calls.map((c) => {
+          if (c.path === "pcb_Layer.getTheNumberOfCopperLayers") return { ok: true, value: 2 };
+          if (c.path === "pcb_Primitive.getPrimitivesBBox") {
+            const id = String((c.args?.[0] as unknown[] | undefined)?.[0]);
+            return options.bboxes?.[id] ? { ok: true, value: options.bboxes[id] } : { ok: false, error: { code: "easyeda_api_error", message: `no bbox for ${id}` } };
+          }
+          return { ok: false, error: { code: "api_unavailable", message: `${c.path} not faked` } };
+        })
+      };
+    }
     if (method === "schematicSnapshot") {
       if (current.uuid !== "sch1") throw new BridgeRpcError("needs schematic", "unsupported_document");
       return options.schematic ?? { components: [], pins: [], counts: { components: 0 } };

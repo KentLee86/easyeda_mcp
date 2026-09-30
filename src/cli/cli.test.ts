@@ -7,6 +7,7 @@ import { connectFakeExtension, silentLogger, waitFor } from "../bridge/fakeExten
 import { CliUsageError, joinNegativeNumbers, parseCli, parseJsonArg } from "./args.js";
 import { runCli, runEditorCommand } from "./main.js";
 import { fakeEditor } from "../mcp/fakeEditor.testutil.js";
+import { SAMPLE_PCB } from "../pcb/fixtures.testutil.js";
 
 const cleanups: Array<() => Promise<void> | void> = [];
 
@@ -232,5 +233,28 @@ describe("CLI export / package / check (fake editor)", () => {
     expect(JSON.parse(out).unsupported.map((item: { kind: string }) => item.kind)).toContain("ipc2581");
     expect(await runCli(["check", "--no-start"], io)).toBe(2);
     expect(JSON.parse(err).error.code).toBe("hub_not_running");
+    expect(await runCli(["pcb", "analyze", "--no-start"], io)).toBe(2);
+  });
+
+  it("parses pcb analyze options", () => {
+    expect(parseCli(["pcb", "analyze"]).command).toEqual({ name: "pcb-analyze", json: false, padBBox: false });
+    expect(parseCli(["pcb", "analyze", "--json", "--top", "5", "--out", "r.json", "--grid", "5", "--pad-bbox"]).command).toEqual({ name: "pcb-analyze", json: true, padBBox: true, top: 5, out: "r.json", grid: 5 });
+    expect(() => parseCli(["pcb", "analyze", "--top", "0"])).toThrow(CliUsageError);
+    expect(() => parseCli(["pcb", "analyze", "--strict"])).toThrow(CliUsageError);
+  });
+
+  it("pcb analyze prints a summary, writes --out, and exits 1 on warnings / 0 when clean", async () => {
+    const dir = await tempDir();
+    const out = path.join(dir, "report.json");
+    const dirty = await runEditorCommand(parseCli(["pcb", "analyze", "--out", out, "--pad-bbox"]).command as never, fakeEditor({ pcb: SAMPLE_PCB }).bridge as never, undefined, noStdin);
+    expect(dirty.exitCode).toBe(1);
+    expect(dirty.text).toMatch(/^WARNINGS: 0 error\(s\), 1 warning/);
+    expect(dirty.text).toContain(`Report: ${out}`);
+    expect(JSON.parse(await readFile(out, "utf8")).routing.possiblyUnrouted).toEqual(["N1"]);
+    const routed = { ...SAMPLE_PCB, tracks: [{ net: "N1", layer: 1, startX: 200, startY: -200, endX: 600, endY: -200, lineWidth: 10 }] };
+    const clean = await runEditorCommand(parseCli(["pcb", "analyze", "--json"]).command as never, fakeEditor({ pcb: routed }).bridge as never, undefined, noStdin);
+    expect(clean.exitCode).toBe(0);
+    expect(clean.text).toBeUndefined();
+    expect(clean.output).toMatchObject({ ok: true, documents: { restored: true } });
   });
 });

@@ -22,6 +22,7 @@ Use this page when you know what you want to do and need the right MCP tool.
 | Export any manufacturing/documentation file (gerber, STEP, pick and place, iBOM, ODB++, ...) | `easyeda_export` |
 | Build a fab/assembly package with a manifest | `easyeda_package` |
 | Check the design (DRC + schematic vs PCB) | `easyeda_design_check` |
+| Review placement and routing (density, overlaps, spacing, net lengths, open nets) | `easyeda_pcb_analyze` |
 | Export BOM/netlist/Gerber/PDF (older per-kind tools) | `easyeda_export_bom`, `easyeda_export_netlist`, `easyeda_export_gerber`, `easyeda_export_pdf` |
 | Save/import/autoroute/autolayout | `easyeda_confirmed_action` |
 | Read the whole PCB as data | `easyeda_pcb_snapshot` |
@@ -278,6 +279,10 @@ Exports several kinds into one folder (`<project>-<kind>.<ext>`) plus `manifest.
 ### `easyeda_design_check`
 
 DRC, then schematic connectivity (all pages) compared with the PCB netlist export as a pin partition: split nets, merged nets, net-name mismatches, parts missing on either side. Also counts unconnected schematic pins. PCB-only parts with no connected pads (mounting holes, fiducials) are reported as information only. Does not modify the design.
+
+### `easyeda_pcb_analyze`
+
+Placement and routing report from one PCB snapshot: board size/area/copper layers, per-side placement density, parts outside the outline, same-side overlaps, closest part pairs (`top`), per-net track length, segments, vias, layers and widths, and `possibly-unrouted` nets whose pads are not all joined by tracks, vias or pours (pours counted by their outline). `grid` adds off-grid info findings; `padBBox` uses pad extents instead of EasyEDA's body boxes. Units mil. Switches to the PCB if needed and back; does not modify the design. Same report as `easyeda pcb analyze` (see [CLI](./cli.md)).
 
 ## PCB Data and the Generic API
 

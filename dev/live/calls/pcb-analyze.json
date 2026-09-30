@@ -1,0 +1,4 @@
+[["easyeda_pcb_analyze",{"top":5},4000],
+ ["easyeda_pcb_analyze",{"top":5,"padBBox":true},1500],
+ ["easyeda_api_call",{"path":"pcb_Primitive.getPrimitiveBoardLine"},1500],
+ ["easyeda_api_call",{"path":"pcb_PrimitivePolyline.getAll"},1500]]

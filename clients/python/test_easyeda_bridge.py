@@ -72,6 +72,8 @@ class FakeHub(BaseHTTPRequestHandler):
             elif self.path == "/v1/ops/package":
                 result = {"manifest": {"project": "B", "generatedAt": "2026-09-30T12:00:00.000Z", "files": [{"kind": "gerber", "path": "B-gerber.zip"}], "failures": []},
                           "files": [{"kind": "gerber", "fileName": "B-gerber.zip", "base64": b64(b"PK\x03\x04zz")}]}
+            elif self.path == "/v1/ops/pcb-analyze":
+                result = {"ok": False, "routing": {"possiblyUnrouted": ["N1"]}, "summary": {"errors": 0, "warnings": 1, "infos": 0}}
             else:
                 result = {"ok": False, "findings": 1, "drc": {"ok": False, "errorCount": 1}}
             self._send(200, {"ok": True, "result": result})
@@ -192,6 +194,15 @@ class BridgeClientTest(unittest.TestCase):
         report = self.eda.check(strict=True)
         self.assertFalse(report["ok"])
         self.assertEqual(FakeHub.calls[-1], ("/v1/ops/check", {"strict": True}))
+
+    def test_analyze(self):
+        out = self.dir / "reports" / "analysis.json"
+        report = self.eda.analyze(top=5, grid=5, pad_bbox=True, out=out)
+        self.assertFalse(report["ok"])
+        self.assertEqual(FakeHub.calls[-1], ("/v1/ops/pcb-analyze", {"top": 5, "grid": 5, "padBBox": True}))
+        self.assertEqual(json.loads(out.read_text())["routing"]["possiblyUnrouted"], ["N1"])
+        self.eda.analyze()
+        self.assertEqual(FakeHub.calls[-1], ("/v1/ops/pcb-analyze", {"top": 10}))
 
     def test_config_dir_resolution(self):
         self.assertEqual(config_dir({"EASYEDA_MCP_CONFIG_DIR": "/x/y"}), pathlib.Path("/x/y"))

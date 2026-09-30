@@ -23,6 +23,7 @@ eda.exports()                                  # export catalog (kinds, unsuppor
 eda.export("step", out="out/")                 # gerber, pnp, bom, ibom, odb, ...
 eda.package(preset="assembly", zip=True)       # folder + manifest.json (+ zip)
 eda.check()["ok"]                              # DRC + schematic vs PCB netlist
+eda.analyze(top=5)["routing"]["longestNets"]   # placement/routing report (mil)
 ```
 
 Errors raise `BridgeError` with `.code` (`bridge_unavailable`, `api_forbidden`,

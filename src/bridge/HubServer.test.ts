@@ -208,6 +208,25 @@ describe("HubServer ops endpoints", () => {
     const noAuth = await fetch(`${hub.url}/v1/ops/check`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
     expect(noAuth.status).toBe(401);
   });
+
+  it("serves /v1/ops/pcb-analyze", async () => {
+    const { fakeEditor } = await import("../mcp/fakeEditor.testutil.js");
+    const { SAMPLE_PCB } = await import("../pcb/fixtures.testutil.js");
+    const editor = fakeEditor({ pcb: SAMPLE_PCB });
+    const hub = new HubServer({ bridge: editor.bridge as never, token: TOKEN, role: "mcp", port: 0 });
+    await hub.start();
+    cleanups.push(() => hub.stop());
+    const post = (body: unknown) => fetch(`${hub.url}/v1/ops/pcb-analyze`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify(body)
+    });
+    const analyzed = await (await post({ top: 3, padBBox: true })).json();
+    expect(analyzed.result).toMatchObject({ ok: false, routing: { possiblyUnrouted: ["N1"] }, documents: { restored: true }, sources: { bboxes: 0 } });
+    expect(editor.current.uuid).toBe("sch1");
+    const bad = await post({ top: -1 });
+    expect(bad.status).toBe(400);
+  });
 });
 
 describe("EasyEdaBridge bye", () => {
