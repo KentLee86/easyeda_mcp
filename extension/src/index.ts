@@ -18,7 +18,7 @@ import {
 } from "../../src/protocol/messages.js";
 import { getBridgeConfig, getBridgeUri } from "./bridgeConfig.js";
 import { EXTENSION_VERSION } from "../../src/version.js";
-import { apiBatch, apiCall, apiDescribe, pcbDrc, pcbSnapshot } from "./api.js";
+import { apiBatch, apiCall, apiDescribe, pcbDrc, pcbSnapshot, renderImage } from "./api.js";
 
 type EasyEdaApi = Record<string, any>;
 
@@ -121,7 +121,8 @@ const handlers: Record<string, (params: Record<string, any>) => Promise<unknown>
   apiBatch,
   apiDescribe,
   pcbSnapshot,
-  pcbDrc
+  pcbDrc,
+  renderImage
 };
 
 export function activate(status?: string, arg?: string): void {

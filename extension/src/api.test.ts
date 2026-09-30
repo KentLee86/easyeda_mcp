@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { apiBatch, apiCall, apiDescribe, pcbDrc, pcbSnapshot, toPlain } from "./api.js";
+import { apiBatch, apiCall, apiDescribe, pcbDrc, pcbSnapshot, renderImage, toPlain } from "./api.js";
 
 class Primitive {
   readonly #state: { id: string; x: number };
@@ -118,5 +118,32 @@ describe("pcbDrc", () => {
   it("maps a boolean-only answer to ok", async () => {
     eda.pcb_Drc.check.mockResolvedValueOnce(true as never);
     await expect(pcbDrc({})).resolves.toMatchObject({ ok: true, errorCount: 0 });
+  });
+});
+
+describe("renderImage", () => {
+  it("fits the primitives' box using the scale-1 probe and returns the PNG as base64", async () => {
+    vi.useFakeTimers();
+    const zoomTo = vi.fn(async (x: number, _y: number, scale: number) => ({
+      // canvas = document / 10; 700x400 canvas units visible at scale 1
+      left: x / 10 - 350 / scale, right: x / 10 + 350 / scale, top: 0, bottom: -400 / scale
+    }));
+    const png = new Blob([new Uint8Array([137, 80, 78, 71])], { type: "image/png" });
+    vi.stubGlobal("eda", {
+      ...eda,
+      pcb_Primitive: { getPrimitivesBBox: async () => ({ minX: 1000, maxX: 1200, minY: -500, maxY: -400 }) },
+      dmt_EditorControl: { zoomTo, getCurrentRenderedAreaImage: async () => png }
+    });
+
+    const pending = renderImage({ primitiveIds: ["e1"], margin: 0 });
+    await vi.runAllTimersAsync();
+    const result = await pending;
+
+    // box 200x100 doc plus 1 unit each side = 20.2x10.2 canvas; width limits: 700/20.2
+    const [x, y, scale] = zoomTo.mock.calls.at(-1)!;
+    expect([x, y]).toEqual([1100, -450]);
+    expect(scale).toBeCloseTo(700 / 20.2, 6);
+    expect(result).toMatchObject({ mimeType: "image/png", size: 4, base64: "iVBORw==" });
+    vi.useRealTimers();
   });
 });

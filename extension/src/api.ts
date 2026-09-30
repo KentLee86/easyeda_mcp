@@ -186,3 +186,58 @@ export async function pcbDrc(params: Record<string, any>): Promise<Record<string
   const errorCount = countDrcErrors(raw);
   return { ok: errorCount === 0, errorCount, categories, ...(params.verbose === false ? {} : { raw }) };
 }
+
+/**
+ * PNG of what the editor canvas currently shows (~80 ms). Optionally zoom to a
+ * region first ({left, right, top, bottom} in document units) or to primitives.
+ */
+/**
+ * Fit a document-coordinate region into the view. zoomToRegion/navigateToRegion
+ * do not change the zoom on PCB tabs, but zoomTo(center, scale) does and returns
+ * the visible area in canvas units (PCB canvas = document mil / 10), so probe at
+ * scale 1 and derive the scale that fits.
+ */
+async function fitView(region: { left: number; right: number; top: number; bottom: number }): Promise<void> {
+  const cx = (region.left + region.right) / 2;
+  const cy = (region.top + region.bottom) / 2;
+  const probe = await eda.dmt_EditorControl.zoomTo(cx, cy, 1) as { left: number; right: number; top: number; bottom: number } | undefined;
+  if (!probe || typeof probe.left !== "number") {
+    return;
+  }
+  const canvasCx = (probe.left + probe.right) / 2;
+  const unit = Math.abs(cx) > 1e-6 && Math.abs(canvasCx) > 1e-6 ? canvasCx / cx : 1;
+  const width = Math.abs(region.right - region.left) * Math.abs(unit) || 1;
+  const height = Math.abs(region.bottom - region.top) * Math.abs(unit) || 1;
+  const scale = Math.min(Math.abs(probe.right - probe.left) / width, Math.abs(probe.bottom - probe.top) / height);
+  await eda.dmt_EditorControl.zoomTo(cx, cy, scale);
+}
+
+export async function renderImage(params: Record<string, any>): Promise<Record<string, unknown>> {
+  const info = await eda.dmt_SelectControl.getCurrentDocumentInfo();
+  const isPcb = [3, 12, 15].includes(info?.documentType);
+  let region = params.region;
+  if (!region && Array.isArray(params.primitiveIds) && params.primitiveIds.length > 0) {
+    const box = toPlain(await (isPcb ? eda.pcb_Primitive : eda.sch_Primitive).getPrimitivesBBox(params.primitiveIds)) as Record<string, number> | undefined;
+    if (box && typeof box.minX === "number") {
+      const margin = Number(params.margin ?? 0.5);
+      const dx = (box.maxX - box.minX) * margin + 1;
+      const dy = (box.maxY - box.minY) * margin + 1;
+      region = { left: box.minX - dx, right: box.maxX + dx, top: box.minY - dy, bottom: box.maxY + dy };
+    }
+  }
+  if (region && ["left", "right", "top", "bottom"].every((key) => typeof region[key] === "number")) {
+    await fitView(region);
+    // The canvas redraws asynchronously after a view change.
+    await new Promise((done) => setTimeout(done, Number(params.settleMs ?? 300)));
+  }
+  const image = await eda.dmt_EditorControl.getCurrentRenderedAreaImage();
+  if (!image || typeof image.arrayBuffer !== "function") {
+    throw codedError("render_failed", "EasyEDA Pro did not return an image.");
+  }
+  const bytes = new Uint8Array(await image.arrayBuffer());
+  let binary = "";
+  for (let index = 0; index < bytes.length; index += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
+  }
+  return { mimeType: image.type || "image/png", size: bytes.length, base64: btoa(binary), ...(region ? { region } : {}) };
+}

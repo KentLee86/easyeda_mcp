@@ -30,7 +30,10 @@ export function injectionSource(bundle, { native = true, config = {} } = {}) {
   if (previous && typeof previous.deactivate === "function") {
     try { previous.deactivate(); } catch (error) { console.warn("previous deactivate failed", error); }
   }
-  globalThis.__EASYEDA_MCP_BRIDGE_CONFIG__ = ${JSON.stringify({ stateKey: "Dev", ...config })};
+  // A fresh state key per injection: a previous instance with a connect already
+  // in flight must not see this instance's state (it would take the bridge over).
+  globalThis.__EASYEDA_MCP_BRIDGE_CONFIG__ = ${JSON.stringify({ ...config })};
+  globalThis.__EASYEDA_MCP_BRIDGE_CONFIG__.stateKey = "Dev" + Date.now();
   const root = window._EXTAPI_ROOT_;
   const sockets = new Map();
   const nativeSocket = {
