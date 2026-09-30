@@ -137,6 +137,21 @@ export type MoveResult = {
 
 /** Resolve a designator via pcbSnapshot, modify it, and read it back. */
 export async function movePcbComponent(bridge: BridgeClient, request: MoveRequest, timeoutMs = 30_000): Promise<MoveResult> {
+  // Moves need the PCB tab (PCB APIs on a schematic tab are refused); switch and
+  // restore like exports do. Extensions without useDocument keep the old behavior.
+  const switched = await bridge.call("useDocument", { kind: "pcb" }, timeoutMs).catch(() => undefined) as
+    { previous?: { uuid?: string } | null; current?: { uuid?: string } } | undefined;
+  try {
+    return await moveOnPcb(bridge, request, timeoutMs);
+  } finally {
+    const previous = switched?.previous?.uuid;
+    if (previous && previous !== switched?.current?.uuid) {
+      await bridge.call("useDocument", { uuid: previous }, timeoutMs).catch(() => undefined);
+    }
+  }
+}
+
+async function moveOnPcb(bridge: BridgeClient, request: MoveRequest, timeoutMs: number): Promise<MoveResult> {
   const snapshot = await bridge.call("pcbSnapshot", { include: ["components"] }, timeoutMs);
   const component = findComponentByDesignator(componentsOf(snapshot), request.designator);
   const requested = buildMoveProperties(component, request);

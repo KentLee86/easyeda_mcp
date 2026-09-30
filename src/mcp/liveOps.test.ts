@@ -31,6 +31,11 @@ function fakeBridge(activeDocumentType: "pcb" | "schematic" = "pcb") {
   const state = new Map(COMPONENTS.map((component) => [component.primitiveId, { ...component }]));
   const call = vi.fn(async (method: string, params?: unknown) => {
     const p = params as { path?: string; args?: unknown[] } | undefined;
+    if (method === "useDocument") {
+      const q = params as { kind?: string; uuid?: string };
+      if (q.kind) return { previous: { uuid: activeDocumentType === "pcb" ? "pcb-1" : "sch-1" }, current: { uuid: q.kind === "pcb" ? "pcb-1" : "sch-1" } };
+      return { previous: { uuid: "pcb-1" }, current: { uuid: q.uuid } };
+    }
     if (method === "pcbSnapshot") return { units: "mil", components: [...state.values()] };
     if (method === "schematicSnapshot") return { components: [{ primitiveId: "s1", designator: "U1" }] };
     if (method === "renderImage") return { mimeType: "image/png", size: 3, base64: "iVBO", region: { left: 0, right: 1, top: 0, bottom: 1 } };
@@ -115,6 +120,13 @@ describe("move resolution", () => {
     });
     expect(bridge.call).toHaveBeenCalledWith("apiCall", { path: "pcb_PrimitiveComponent.modify", args: ["e12", { x: 110 }] }, 30_000);
     expect(moved.modifyResult).not.toHaveProperty("extra");
+  });
+
+  it("switches to the PCB for the move and reopens the schematic afterwards", async () => {
+    const bridge = fakeBridge("schematic");
+    await movePcbComponent(bridge, { designator: "U1", dx: 10 });
+    const docCalls = bridge.call.mock.calls.filter(([method]) => method === "useDocument").map(([, params]) => params);
+    expect(docCalls).toEqual([{ kind: "pcb" }, { uuid: "sch-1" }]);
   });
 });
 
@@ -221,5 +233,23 @@ describe("catalog-driven MCP tools", () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("easyeda_pcb_analyze tool", () => {
+  it("returns the summary text and the report, restores the document, and is annotated non-destructive", async () => {
+    const { fakeEditor } = await import("./fakeEditor.testutil.js");
+    const { SAMPLE_PCB } = await import("../pcb/fixtures.testutil.js");
+    const editor = fakeEditor({ pcb: SAMPLE_PCB });
+    const client = await makeClient(editor.bridge as never);
+    const result = await client.callTool({ name: "easyeda_pcb_analyze", arguments: { top: 3 } });
+    expect(result.isError).toBeFalsy();
+    const content = result.content as Array<{ type: string; text?: string }>;
+    expect(content[0]?.text).toContain("Possibly unrouted: N1");
+    expect(result.structuredContent).toMatchObject({ report: { ok: false, documents: { restored: true }, routing: { possiblyUnrouted: ["N1"] } } });
+    expect(editor.current.uuid).toBe("sch1");
+    const { tools } = await client.listTools();
+    const tool = tools.find((item) => item.name === "easyeda_pcb_analyze");
+    expect(tool?.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: false, idempotentHint: true });
   });
 });
