@@ -21,6 +21,11 @@ Use this page when you know what you want to do and need the right MCP tool.
 | Move the editor to a part | `easyeda_navigate_component` |
 | Export manufacturing files | `easyeda_export_bom`, `easyeda_export_netlist`, `easyeda_export_gerber`, `easyeda_export_pdf` |
 | Save/import/autoroute/autolayout | `easyeda_confirmed_action` |
+| Read the whole PCB as data | `easyeda_pcb_snapshot` |
+| Run DRC | `easyeda_pcb_drc` |
+| Look at an area as an image | `easyeda_render_view` |
+| Move a PCB component | `easyeda_pcb_move_component` |
+| Call any EasyEDA Pro API method | `easyeda_api_describe`, `easyeda_api_call` |
 
 ## Recommended First Flow
 
@@ -245,6 +250,32 @@ Exports Gerber fabrication data (zip) from the active PCB. PCB only.
 ### `easyeda_export_pdf`
 
 Exports a PDF from the active schematic or PCB document.
+
+## PCB Data and the Generic API
+
+These read or change the live PCB as JSON instead of screenshots. Coordinates are EasyEDA document units (mil). The same operations are available from the [`easyeda` CLI and the Python client](./cli.md).
+
+### `easyeda_pcb_snapshot`
+
+Reads components (designator, footprint, x, y, rotation, layer, pads), pads, tracks, arcs, vias, pours, fills, regions, strings, nets, layers and the board outline in one call. Limit it with `include`, e.g. `["components", "tracks"]`. Requires the PCB tab to be active.
+
+### `easyeda_pcb_drc`
+
+Runs EasyEDA's DRC and returns `ok`, `errorCount`, counts per category and the raw error tree.
+
+### `easyeda_render_view`
+
+Returns a PNG of the editor canvas, zoomed to a `designator` (or a `region`). It changes the editor's zoom.
+
+### `easyeda_pcb_move_component`
+
+Moves a component by `designator` with absolute `x`/`y` or relative `dx`/`dy`, and optionally `rotation` or `layer` (`top`/`bottom`). Returns the position before and after, read back from EasyEDA. Needs `confirmation` `CONFIRM move <designator>`.
+
+### `easyeda_api_describe` and `easyeda_api_call`
+
+`easyeda_api_describe` lists the methods of the reachable namespaces (`dmt_`, `pcb_`, `sch_`, `lib_`, `pnl_`; `sys_` for files, network and storage is closed). `easyeda_api_call` calls one, e.g. `{"path": "pcb_PrimitiveVia.getAll"}` or `{"path": "pcb_PrimitiveComponent.modify", "args": ["e12", {"x": 100}]}`. Methods named `get*`, `is*`, `has*`, `check*`, `calculate*`, `convert*` count as reads; anything else changes the project and needs `confirmation` `CONFIRM api <path>`.
+
+Set `EASYEDA_MCP_ALLOW_MUTATIONS=1` in the MCP server environment to skip the confirmation for `easyeda_api_call` and `easyeda_pcb_move_component` when you want an agent to edit freely. `easyeda_confirmed_action` keeps its confirmation.
 
 ## Explicitly Confirmed Actions
 

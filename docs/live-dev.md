@@ -73,6 +73,46 @@ node dev/live/compare-netlist.mjs dev/live/.work/raw.json dev/live/.work/board.e
 
 It treats connectivity as a partition of pins and reports nets the snapshot splits or merges, name mismatches and pins missing on either side; it exits non-zero on any discrepancy.
 
+## Driving the Editor from Code
+
+For interactive work keep a daemon running next to Pro and use the CLI (or the Python client) from sidecars; they share the hub token through `dev/live/.work/config`:
+
+```bash
+npm run build
+docker run -d --name easyeda-mcp-daemon --network container:easyeda-mcp-live \
+  -u "$(id -u):$(id -g)" -e HOME=/tmp -e EASYEDA_MCP_CONFIG_DIR=/repo/dev/live/.work/config \
+  -v "$PWD":/repo -w /repo node:22-slim node dist/index.js daemon
+dev/live/node.sh node dev/live/inject.mjs          # or rely on an installed extension
+E="dev/live/node.sh node dist/cli/index.js"
+$E status
+$E pcb snapshot --include components,tracks --out /repo/dev/live/.work/board.json
+$E pcb move U1 --dx 50
+$E pcb drc
+$E render --designator U1 --out /repo/dev/live/.work/u1.png
+```
+
+`dev/live/run.mjs` started while the daemon runs uses it through the hub (proxy mode) instead of starting its own bridge. Hot-loading parks an installed copy of the extension (otherwise the two keep replacing each other's connection); `MCP Bridge -> Reconnect` resumes it.
+
+### Where the time goes
+
+Measured on EasyEDA Pro 3.2.149 with a 79-part, 2-layer board:
+
+| Step | Time |
+| --- | --- |
+| Container start / editor ready (already activated) | 0.2 s / 2.8 s |
+| Open a local project (`open-project.sh`, includes a 3 s settle wait) | 7.5 s |
+| Hot-load the extension and connect | 0.03 s + 0.3 s |
+| CLI command incl. `docker run` of the sidecar | ~0.26 s (the call itself is mostly < 50 ms) |
+| `pcbSnapshot` (all parts, 400 KB JSON) | 34 ms |
+| Move a component (modify + read back) | 30–60 ms |
+| DRC | 0.37 s |
+| Schematic snapshot of 3 pages (opens each page) | 0.5–1.5 s |
+| Zoomed PNG render / unzoomed | 0.38 s / 0.08 s |
+| Exports (BOM, netlist, Gerber, PDF) | 0.3–0.5 s |
+| New MCP process reaching the extension: proxy via hub / after `bye` / before this work | 4 ms / 0.9 s / ~19 s |
+
+Activation is stored in the `easyeda-mcp-live-home` volume, so it happens once.
+
 ## Release Check with the Real Package
 
 Injection skips the parts only an installed extension exercises: `sys_WebSocket`, the external-interaction permission, header menus and startup activation. Before a release, install the package once:

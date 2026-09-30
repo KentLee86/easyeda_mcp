@@ -47,6 +47,12 @@ Anything else, including `I confirm`, `confirmed`, or a phrase for a different a
 
 The MCP client should send the confirmation only after the user explicitly approves that action. It should not fill it in on its own.
 
+### Editing Through the API
+
+`easyeda_api_call` (non-read methods) and `easyeda_pcb_move_component` also change the project. They need `CONFIRM api <path>` and `CONFIRM move <designator>` respectively, unless the user starts the MCP server with `EASYEDA_MCP_ALLOW_MUTATIONS=1`. Only the `dmt_`, `pcb_`, `sch_`, `lib_` and `pnl_` API namespaces are reachable; file, network and storage APIs (`sys_*`) are not.
+
+The local JSON API used by the CLI and the Python client (see [CLI](./cli.md)) has no confirmation step: it requires the token in the user's config directory, accepts only 127.0.0.1 and rejects browser requests.
+
 ## Why Confirmation Exists
 
 AI-assisted exploration often involves guesses, retries, and partial context.
