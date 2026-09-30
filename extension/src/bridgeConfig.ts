@@ -3,6 +3,9 @@ export type ExtensionBridgeConfig = {
   port: number;
   openTimeoutMs: number;
   heartbeatIntervalMs: number;
+  /** Reconnect when the server has been silent this long (it acks every heartbeat). */
+  livenessTimeoutMs: number;
+  /** Backoff for the first attempts; afterwards the last delay repeats forever. */
   reconnectDelayMs: number[];
 };
 
@@ -12,7 +15,8 @@ const defaultBridgeConfig: ExtensionBridgeConfig = {
   host: "127.0.0.1",
   port: 8765,
   openTimeoutMs: 2_500,
-  heartbeatIntervalMs: 15_000,
+  heartbeatIntervalMs: 5_000,
+  livenessTimeoutMs: 15_000,
   reconnectDelayMs: [0, 1_000, 2_500, 5_000]
 };
 

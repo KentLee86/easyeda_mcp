@@ -45,7 +45,7 @@ type BridgeErrorMessage = {
 };
 
 const WS_ID = "easyeda-mcp-bridge";
-const EXTENSION_VERSION = "0.1.0";
+const EXTENSION_VERSION = "0.2.0";
 const bridgeConfig = getBridgeConfig();
 
 type ConnectionPhase = "idle" | "connecting" | "connected" | "blocked";
@@ -58,7 +58,12 @@ type ConnectionState = {
   lastStatusAt?: string;
   lastHandshakeAt?: string;
   lastAttemptAt?: string;
+  /** Epoch ms of the last message received from the MCP server (acks, calls). */
+  lastServerMessageAt?: number;
   connectedOnce: boolean;
+  /** Set when the connection dropped, so the next successful open is announced. */
+  lostSinceLastOpen: boolean;
+  disposed: boolean;
   compatibility: ProtocolCompatibility;
   reconnectTimer?: ReturnType<typeof setTimeout>;
   openTimeoutTimer?: ReturnType<typeof setTimeout>;
@@ -69,6 +74,8 @@ const connectionState: ConnectionState = {
   phase: "idle",
   attemptIndex: 0,
   connectedOnce: false,
+  lostSinceLastOpen: false,
+  disposed: false,
   compatibility: evaluateProtocolCompatibility(PROTOCOL_VERSION)
 };
 
@@ -103,15 +110,27 @@ const handlers: Record<string, (params: Record<string, any>) => Promise<unknown>
 
 export function activate(status?: "onStartupFinished", arg?: string): void {
   log("warn", `EasyEDA MCP Bridge activated: ${status ?? "manual"} ${arg ?? ""}`);
+  connectionState.disposed = false;
   void ensureBridgeConnected({ reason: "activation", manual: false });
 }
 
+/** Stop retrying and close the socket (extension unload or dev hot-reload). */
+export function deactivate(): void {
+  connectionState.disposed = true;
+  resetConnectionTimers();
+  closeSocket();
+  connectionState.phase = "idle";
+}
+
 export function connect(): void {
+  connectionState.disposed = false;
   void ensureBridgeConnected({ reason: "manual-connect", manual: true, resetAttempts: true });
 }
 
 export function reconnect(): void {
+  connectionState.disposed = false;
   resetConnectionTimers();
+  closeSocket();
   connectionState.phase = "idle";
   connectionState.attemptIndex = 0;
   void ensureBridgeConnected({ reason: "manual-reconnect", manual: true, resetAttempts: true });
@@ -128,6 +147,10 @@ export async function runDiagnostics(): Promise<void> {
 }
 
 async function ensureBridgeConnected(options: { reason: string; manual: boolean; resetAttempts?: boolean }): Promise<void> {
+  if (connectionState.disposed) {
+    return;
+  }
+
   if (options.resetAttempts) {
     connectionState.attemptIndex = 0;
   }
@@ -146,19 +169,21 @@ async function ensureBridgeConnected(options: { reason: string; manual: boolean;
 async function startBridge(options: { reason: string; manual: boolean }): Promise<void> {
   ensureApi("sys_WebSocket", "register");
   resetConnectionTimers();
+  // sys_WebSocket.register reuses an OPEN/CONNECTING socket with the same id and
+  // never reports close, so a stale socket must be closed before retrying.
+  closeSocket();
   connectionState.phase = "connecting";
   connectionState.lastAttemptAt = new Date().toISOString();
 
   const wsUri = getBridgeUri(bridgeConfig);
   const attemptIndex = connectionState.attemptIndex;
-  const openTimeoutMs = bridgeConfig.openTimeoutMs;
   connectionState.openTimeoutTimer = setTimeout(() => {
     const error = apiError("bridge_open_timeout", `Timed out waiting for EasyEDA MCP Bridge to open ${wsUri}.`);
     handleConnectionFailure(normalizeError(error), {
       manual: options.manual,
       shouldRetry: true
     });
-  }, openTimeoutMs);
+  }, bridgeConfig.openTimeoutMs);
 
   try {
     eda.sys_WebSocket.register(
@@ -168,12 +193,16 @@ async function startBridge(options: { reason: string; manual: boolean }): Promis
         await handleMessage(event.data);
       },
       async () => {
+        const announce = !connectionState.connectedOnce || options.manual || connectionState.lostSinceLastOpen;
         connectionState.phase = "connected";
         connectionState.lastOpenAt = new Date().toISOString();
         connectionState.lastHandshakeAt = connectionState.lastOpenAt;
+        connectionState.lastServerMessageAt = Date.now();
         connectionState.lastError = undefined;
         connectionState.compatibility = evaluateProtocolCompatibility(PROTOCOL_VERSION);
         connectionState.attemptIndex = 0;
+        connectionState.connectedOnce = true;
+        connectionState.lostSinceLastOpen = false;
         clearOpenTimeout();
         send({
           kind: "hello",
@@ -185,9 +214,8 @@ async function startBridge(options: { reason: string; manual: boolean }): Promis
           status: await getStatus()
         });
         startHeartbeat();
-        if (!connectionState.connectedOnce || options.manual) {
-          connectionState.connectedOnce = true;
-          showMessage("EasyEDA MCP Bridge", `Connected to ${wsUri}.`);
+        if (announce) {
+          showToast(`MCP bridge connected (${wsUri})`, "success");
         }
       }
     );
@@ -202,10 +230,19 @@ async function startBridge(options: { reason: string; manual: boolean }): Promis
   log("warn", `Bridge connection attempt ${attemptIndex + 1} started for ${options.reason} -> ${wsUri}`);
 }
 
-async function handleMessage(raw: string): Promise<void> {
-  let message: BridgeCallMessage;
+function closeSocket(): void {
   try {
-    message = JSON.parse(raw) as BridgeCallMessage;
+    eda.sys_WebSocket?.close?.(WS_ID);
+  } catch {
+    // Nothing registered yet, or permission missing; register will report it.
+  }
+}
+
+async function handleMessage(raw: string): Promise<void> {
+  connectionState.lastServerMessageAt = Date.now();
+  let message: BridgeCallMessage | { kind: "ack" };
+  try {
+    message = JSON.parse(raw) as BridgeCallMessage | { kind: "ack" };
   } catch (error) {
     log("warn", "Ignored malformed MCP bridge message", error);
     return;
@@ -280,6 +317,18 @@ function startHeartbeat(): void {
     clearInterval(connectionState.heartbeatTimer);
   }
   connectionState.heartbeatTimer = setInterval(() => {
+    // A closed browser WebSocket drops sends silently, so a missing server ack
+    // is the only reliable sign that the MCP server went away.
+    const silentMs = Date.now() - (connectionState.lastServerMessageAt ?? 0);
+    if (silentMs > bridgeConfig.livenessTimeoutMs) {
+      connectionState.lostSinceLastOpen = true;
+      closeSocket();
+      handleConnectionFailure(normalizeError(apiError("bridge_lost", `No reply from the MCP server for ${Math.round(silentMs / 1000)}s.`)), {
+        manual: false,
+        shouldRetry: true
+      });
+      return;
+    }
     void emitStatusUpdate().catch((error) => {
       handleConnectionFailure(normalizeError(error), {
         manual: false,
@@ -317,15 +366,21 @@ function handleConnectionFailure(
     clearInterval(connectionState.heartbeatTimer);
     connectionState.heartbeatTimer = undefined;
   }
+  if (connectionState.phase === "connected") {
+    connectionState.lostSinceLastOpen = true;
+  }
 
   connectionState.lastError = error;
   connectionState.compatibility = evaluateProtocolCompatibility(PROTOCOL_VERSION);
   connectionState.phase = isPermissionLikeError(error) ? "blocked" : "idle";
 
-  const hasRetryLeft = options.shouldRetry && connectionState.attemptIndex < bridgeConfig.reconnectDelayMs.length - 1;
-  if (hasRetryLeft) {
+  // Keep retrying (the MCP server may start later or restart); after the initial
+  // backoff the last delay repeats. A missing permission will not fix itself.
+  const retry = options.shouldRetry && !connectionState.disposed && connectionState.phase !== "blocked";
+  if (retry && !connectionState.reconnectTimer) {
+    const delays = bridgeConfig.reconnectDelayMs;
     const nextAttempt = connectionState.attemptIndex + 1;
-    const delayMs = bridgeConfig.reconnectDelayMs[nextAttempt];
+    const delayMs = delays[Math.min(nextAttempt, delays.length - 1)];
     connectionState.attemptIndex = nextAttempt;
     connectionState.reconnectTimer = setTimeout(() => {
       connectionState.reconnectTimer = undefined;
@@ -336,7 +391,7 @@ function handleConnectionFailure(
     }, delayMs);
   }
 
-  if (options.manual || !hasRetryLeft || connectionState.phase === "blocked") {
+  if (options.manual || connectionState.phase === "blocked") {
     showMessage("EasyEDA MCP Bridge", [
       error.message,
       "",
@@ -1004,6 +1059,14 @@ function log(level: "warn" | "error", message: string, details?: unknown): void 
     return;
   }
   console[level](`[easyeda-mcp] ${message}`, details);
+}
+
+function showToast(message: string, type: "success" | "info" | "warn" | "error" = "info"): void {
+  if (eda.sys_ToastMessage?.showMessage) {
+    eda.sys_ToastMessage.showMessage(message, type);
+    return;
+  }
+  log("warn", message);
 }
 
 function showMessage(title: string, message: string): void {

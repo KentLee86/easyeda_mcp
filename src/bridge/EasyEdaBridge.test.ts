@@ -149,6 +149,41 @@ describe("EasyEdaBridge", () => {
   });
 });
 
+describe("EasyEdaBridge liveness and port sharing", () => {
+  it("acks hello and status messages so the extension can detect a dead server", async () => {
+    const bridge = await startBridge();
+    const client = await connectClient(bridge.endpoint);
+    const received: Array<Record<string, unknown>> = [];
+    client.on("message", (data) => received.push(JSON.parse(data.toString())));
+
+    client.send(JSON.stringify({ kind: "hello", client: "easyeda-pro-extension", version: "0.2.0", protocolVersion: "0.2.0", capabilities: {} }));
+    client.send(JSON.stringify({ kind: "status", status: { protocolVersion: "0.2.0" } }));
+    await wait(50);
+
+    expect(received.filter((message) => message.kind === "ack")).toHaveLength(2);
+    client.close();
+  });
+
+  it("stays up when the port is taken and takes it over once released", async () => {
+    const owner = await startBridge();
+    const port = Number(new URL(owner.endpoint).port);
+    const logger = { error: () => undefined, warn: () => undefined, info: () => undefined };
+    const waiting = new EasyEdaBridge({ host: "127.0.0.1", port, logger, portRetryMs: 50 });
+    bridges.push(waiting);
+
+    await expect(waiting.start()).resolves.toBeUndefined();
+    expect(waiting.getStatus().message).toContain("used by another process");
+    await expect(waiting.call("getContext")).rejects.toBeInstanceOf(BridgeUnavailableError);
+
+    await owner.stop();
+    await wait(300);
+    const client = await connectClient(`ws://127.0.0.1:${port}`);
+    await wait(20);
+    expect(waiting.getStatus().connected).toBe(true);
+    client.close();
+  });
+});
+
 async function startBridge(): Promise<EasyEdaBridge> {
   const bridge = new EasyEdaBridge({
     port: 0,

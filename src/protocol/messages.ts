@@ -1,4 +1,8 @@
-export const PROTOCOL_VERSION = "0.1.0";
+/**
+ * 0.2.0: the server acks hello/status (extension liveness watchdog) and export
+ * results carry file contents (base64) instead of opening a save dialog.
+ */
+export const PROTOCOL_VERSION = "0.2.0";
 
 export type ProtocolCompatibility = {
   compatible: boolean;
@@ -84,7 +88,13 @@ export type ClientToServerMessage =
   | BridgeResultMessage
   | BridgeErrorMessage;
 
-export type ServerToClientMessage = BridgeCallMessage;
+/** Sent in reply to hello/status so the extension can detect a dead server. */
+export type BridgeAckMessage = {
+  kind: "ack";
+  at: string;
+};
+
+export type ServerToClientMessage = BridgeCallMessage | BridgeAckMessage;
 
 export type RpcErrorPayload = BridgeErrorMessage["error"];
 

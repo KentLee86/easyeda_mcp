@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { PROTOCOL_VERSION } from "../../src/protocol/messages.js";
 
 type WebSocketRegistration = {
   onMessage?: (event: MessageEvent<string>) => Promise<void>;
@@ -132,10 +133,10 @@ describe("EasyEDA extension bridge handlers", () => {
 
     const helloMessage = JSON.parse(sentMessages.at(0)?.message ?? "{}");
     expect(helloMessage.kind).toBe("hello");
-    expect(helloMessage.protocolVersion).toBe("0.1.0");
+    expect(helloMessage.protocolVersion).toBe(PROTOCOL_VERSION);
     expect(helloMessage.compatibility).toMatchObject({
       compatible: true,
-      expectedProtocolVersion: "0.1.0"
+      expectedProtocolVersion: PROTOCOL_VERSION
     });
   });
 
