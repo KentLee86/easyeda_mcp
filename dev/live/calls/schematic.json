@@ -1,0 +1,7 @@
+[["easyeda_get_context",{},0],
+ ["easyeda_schematic_snapshot",{"includeRaw":false,"allPages":true},0],
+ ["easyeda_get_component_pins",{"query":"U1","includeRaw":false},0],
+ ["easyeda_trace_net",{"query":"GND","includeRaw":false},0],
+ ["easyeda_find_unconnected_pins",{"limit":100,"includeRaw":false},0],
+ ["easyeda_verify_connections",{"checks":[{"type":"pin_on_net","component":"U1","pin":"10","net":"GND"},{"type":"pin_connected","component":"U1","pin":"7"}]},0],
+ ["easyeda_get_context",{},0]]

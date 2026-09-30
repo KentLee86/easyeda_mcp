@@ -8,7 +8,7 @@ import {
   traceNet,
   validateSchematicArea,
   verifyConnections,
-  type RawSchematicData,
+  type RawSchematicPage,
   type SchematicSnapshot
 } from "../../src/schematic/analysis.js";
 import {
@@ -809,9 +809,36 @@ async function getSchematicComponents(): Promise<unknown[]> {
 
 async function collectSchematicSnapshot(options: { includeRaw: boolean; allPages: boolean }): Promise<SchematicSnapshot> {
   ensureApi("sch_PrimitiveComponent", "getAll");
-  const components = toArray(await eda.sch_PrimitiveComponent.getAll(undefined, options.allPages));
-  const pinsByComponent: Record<string, unknown[]> = {};
+  const pages = options.allPages ? await listSchematicPages() : [];
+  if (pages.length === 0) {
+    return buildSchematicSnapshot({ ...(await readOpenSchematicPage()), includeRaw: options.includeRaw });
+  }
 
+  // Pins, wires and texts are only readable on the open page, so visit each page
+  // and restore the document the user was looking at.
+  const original = await optionalCall(() => eda.dmt_SelectControl.getCurrentDocumentInfo());
+  const originalUuid = pickString(original, ["uuid"]);
+  const rawPages: RawSchematicPage[] = [];
+  let current = originalUuid;
+  try {
+    for (const page of pages) {
+      if (current !== page.uuid) {
+        await eda.dmt_EditorControl.openDocument(page.uuid);
+        current = page.uuid;
+      }
+      rawPages.push({ uuid: page.uuid, name: page.name, ...(await readOpenSchematicPage()) });
+    }
+  } finally {
+    if (originalUuid && current !== originalUuid) {
+      await optionalCall(() => eda.dmt_EditorControl.openDocument(originalUuid));
+    }
+  }
+  return buildSchematicSnapshot({ pages: rawPages, includeRaw: options.includeRaw });
+}
+
+async function readOpenSchematicPage(): Promise<Omit<RawSchematicPage, "uuid" | "name">> {
+  const components = toArray(await eda.sch_PrimitiveComponent.getAll(undefined, false));
+  const pinsByComponent: Record<string, unknown[]> = {};
   if (eda.sch_PrimitiveComponent?.getAllPinsByPrimitiveId) {
     for (const component of components) {
       const componentRecord = component && typeof component === "object" ? component as Record<string, unknown> : {};
@@ -823,15 +850,28 @@ async function collectSchematicSnapshot(options: { includeRaw: boolean; allPages
       pinsByComponent[primitiveId] = toArray(pins);
     }
   }
-
-  const rawData: RawSchematicData = {
+  return {
     components,
     pinsByComponent,
-    wires: await optionalCall(() => eda.sch_PrimitiveWire?.getAll ? eda.sch_PrimitiveWire.getAll() : []),
-    texts: await optionalCall(() => eda.sch_PrimitiveText?.getAll ? eda.sch_PrimitiveText.getAll() : []),
-    includeRaw: options.includeRaw
+    wires: toArray(await optionalCall(() => eda.sch_PrimitiveWire?.getAll ? eda.sch_PrimitiveWire.getAll() : [])),
+    texts: toArray(await optionalCall(() => eda.sch_PrimitiveText?.getAll ? eda.sch_PrimitiveText.getAll() : []))
   };
-  return buildSchematicSnapshot(rawData);
+}
+
+/** Schematic pages of the board that owns the active document (schematic page or PCB). */
+async function listSchematicPages(): Promise<Array<{ uuid: string; name?: string }>> {
+  const documentInfo = await optionalCall(() => eda.dmt_SelectControl.getCurrentDocumentInfo());
+  const currentUuid = pickString(documentInfo, ["uuid"]);
+  const project = await optionalCall(() => eda.dmt_Project.getCurrentProjectInfo());
+  const boards = toArray((project as Record<string, unknown> | undefined)?.data) as Array<Record<string, any>>;
+  const board = boards.find((item) =>
+    item?.pcb?.uuid === currentUuid
+    || toArray(item?.schematic?.page).some((page: any) => page?.uuid === currentUuid)
+  ) ?? (boards.length === 1 ? boards[0] : undefined);
+  const pages = toArray(board?.schematic?.page) as Array<Record<string, unknown>>;
+  return pages
+    .map((page) => ({ uuid: stringOrUndefined(page.uuid) ?? "", name: stringOrUndefined(page.name) }))
+    .filter((page) => page.uuid);
 }
 
 async function getPcbNetNames(): Promise<unknown[]> {
