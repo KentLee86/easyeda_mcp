@@ -32,14 +32,50 @@ async function makeClient(bridge: { endpoint: string; getStatus: () => unknown; 
 }
 
 describe("mutation confirmation guard", () => {
-  it("accepts explicit confirmation phrases", () => {
-    expect(hasExplicitMutationConfirmation("confirma salvar")).toBe(true);
-    expect(hasExplicitMutationConfirmation("I confirm this save")).toBe(true);
+  it("accepts exactly CONFIRM <action> (case-insensitive, trimmed)", () => {
+    expect(hasExplicitMutationConfirmation("confirm save", "save")).toBe(true);
+    expect(hasExplicitMutationConfirmation("  CONFIRM   save ", "save")).toBe(true);
+    expect(hasExplicitMutationConfirmation("Confirm Autoroute", "autoroute")).toBe(true);
+    expect(hasExplicitMutationConfirmation("confirm importchanges", "importChanges")).toBe(true);
   });
 
-  it("rejects vague or missing confirmation", () => {
-    expect(hasExplicitMutationConfirmation("pode salvar")).toBe(false);
-    expect(hasExplicitMutationConfirmation("save it")).toBe(false);
+  it("rejects negations, vague text, and phrases for a different action", () => {
+    for (const text of ["not confirmed", "no", "confirmed", "I confirm", "I confirm this save", "confirma salvar", "do not confirm save", "confirm save not", "pode salvar", "save it", ""]) {
+      expect(hasExplicitMutationConfirmation(text, "save"), text).toBe(false);
+    }
+    expect(hasExplicitMutationConfirmation("confirm save", "autoroute")).toBe(false);
+  });
+
+  it.each([
+    ["save", "not confirmed"],
+    ["save", "no"],
+    ["autoroute", "confirm save"]
+  ])("blocks %s with confirmation %j and returns confirmation_required", async (action, confirmation) => {
+    const bridge = {
+      endpoint: "ws://127.0.0.1:8765",
+      getStatus: () => ({ connected: true, updatedAt: new Date().toISOString() }),
+      call: vi.fn()
+    };
+    const client = await makeClient(bridge);
+
+    const result = await client.callTool({ name: "easyeda_confirmed_action", arguments: { action, confirmation } });
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: "confirmation_required",
+      action,
+      expectedConfirmation: `CONFIRM ${action}`
+    });
+    expect((result.content as Array<{ text: string }>)[0]?.text).toContain(`"CONFIRM ${action}"`);
+    expect(bridge.call).not.toHaveBeenCalled();
+  });
+
+  it("documents the exact confirmation phrase in the tool schema", async () => {
+    const client = await makeClient({ endpoint: "ws://x", getStatus: () => ({ connected: false }), call: vi.fn() });
+    const { tools } = await client.listTools();
+    const tool = tools.find((item) => item.name === "easyeda_confirmed_action");
+    expect(tool?.description).toContain("CONFIRM <action>");
+    expect(JSON.stringify(tool?.inputSchema)).toContain("CONFIRM <action>");
   });
 
   it("blocks mutating actions without explicit confirmation", async () => {
@@ -76,14 +112,14 @@ describe("mutation confirmation guard", () => {
       name: "easyeda_confirmed_action",
       arguments: {
         action: "save",
-        confirmation: "confirma salvar",
+        confirmation: "CONFIRM save",
         timeoutMs: 12_345
       }
     });
 
     expect(bridge.call).toHaveBeenCalledWith("confirmedAction", {
       action: "save",
-      confirmation: "confirma salvar",
+      confirmation: "CONFIRM save",
       params: undefined
     }, 12_345);
     expect(result.isError).toBeFalsy();

@@ -76,10 +76,40 @@ const ConnectionCheckSchema = z.discriminatedUnion("type", [
   })
 ]);
 
-const mutatingConfirmationRegex = /\bconfirma\b|\bconfirmo\b|\bconfirmed\b|\bi confirm\b/i;
+const ConfirmedActionSchema = z.enum(["save", "importChanges", "autoroute", "autolayout"]);
+type ConfirmedAction = z.infer<typeof ConfirmedActionSchema>;
 
-export function hasExplicitMutationConfirmation(confirmation: string): boolean {
-  return mutatingConfirmationRegex.test(confirmation);
+/** The exact phrase a client must send to run `action`, e.g. "CONFIRM save". */
+export function expectedConfirmationPhrase(action: string): string {
+  return `CONFIRM ${action}`;
+}
+
+/**
+ * Strict gate: the confirmation must be exactly "CONFIRM <action>" (case-insensitive,
+ * surrounding/inner whitespace normalized). Free-form text is rejected, so negations
+ * like "not confirmed", other actions' phrases, and the old Portuguese "confirma salvar"
+ * phrases no longer pass.
+ */
+export function hasExplicitMutationConfirmation(confirmation: string, action: string): boolean {
+  const normalize = (text: string) => text.trim().replace(/\s+/g, " ").toLowerCase();
+  return normalize(confirmation) === normalize(expectedConfirmationPhrase(action));
+}
+
+function confirmationRequired(action: ConfirmedAction, confirmation: string) {
+  const expected = expectedConfirmationPhrase(action);
+  const payload = {
+    error: "confirmation_required",
+    message: `Action "${action}" was blocked. Set confirmation to exactly "${expected}" (case-insensitive) after the user explicitly approves this action.`,
+    retryable: false,
+    action,
+    expectedConfirmation: expected,
+    receivedConfirmation: confirmation
+  };
+  return {
+    isError: true,
+    content: [{ type: "text" as const, text: `${payload.message}\n\n${JSON.stringify(payload, null, 2)}` }],
+    structuredContent: payload
+  };
 }
 
 export function registerEasyEdaTools(server: McpServer, bridge: EasyEdaBridge): void {
@@ -416,10 +446,10 @@ export function registerEasyEdaTools(server: McpServer, bridge: EasyEdaBridge): 
     "easyeda_confirmed_action",
     {
       title: "Confirmed EasyEDA Pro action",
-      description: "Runs a mutating EasyEDA Pro action only when the confirmation text explicitly confirms the action.",
+      description: "Runs a mutating EasyEDA Pro action only after explicit user approval. The confirmation field must be exactly \"CONFIRM <action>\" for the same action (case-insensitive), e.g. \"CONFIRM save\" or \"CONFIRM autoroute\"; anything else is blocked with error confirmation_required.",
       inputSchema: {
-        action: z.enum(["save", "importChanges", "autoroute", "autolayout"]),
-        confirmation: z.string().describe("Must include an explicit confirmation phrase such as 'confirma salvar'."),
+        action: ConfirmedActionSchema,
+        confirmation: z.string().describe("Exactly \"CONFIRM <action>\" matching the action field (case-insensitive), e.g. \"CONFIRM save\". Only send it after the user explicitly approved this action."),
         params: z.record(z.string(), z.unknown()).optional(),
         timeoutMs: DefaultTimeoutSchema.default(60_000)
       },
@@ -432,8 +462,8 @@ export function registerEasyEdaTools(server: McpServer, bridge: EasyEdaBridge): 
     },
     async ({ action, confirmation, params, timeoutMs }) => {
       try {
-        if (!hasExplicitMutationConfirmation(confirmation)) {
-          return fail(new Error(`Action "${action}" was blocked. The confirmation text must explicitly include a confirmation phrase such as "confirma salvar".`));
+        if (!hasExplicitMutationConfirmation(confirmation, action)) {
+          return confirmationRequired(action, confirmation);
         }
         const result = await bridge.call("confirmedAction", { action, confirmation, params }, timeoutMs);
         return ok(`Executed confirmed EasyEDA Pro action: ${action}.`, {
