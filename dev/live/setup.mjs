@@ -18,7 +18,8 @@ if (state === "activation") {
   await page.waitFor("(document.querySelector('.activateContent') || { value: '' }).value.length > 0", 30_000);
   await page.eval(`Array.from(document.querySelectorAll('a, button, span, div'))
     .find(e => e.children.length == 0 && e.textContent.trim() == 'Activate' && e.offsetParent).click(); 1`);
-  await sleep(5000);
+  // The client reloads into the Start Page; wait for the activation form to go.
+  await page.waitFor("!document.querySelector('.upload-input')", 30_000).catch(() => undefined);
   page.close();
   const next = await Page.open();
   await next.waitFor("!!(window._EXTAPI_ROOT_ && document.querySelector('[class*=client_start_project]'))", 180_000);

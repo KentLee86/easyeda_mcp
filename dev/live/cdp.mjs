@@ -31,7 +31,7 @@ export class Page {
         // Pro is still starting.
       }
       if (Date.now() > end) throw new Error("EasyEDA Pro editor page not reachable over CDP");
-      await sleep(1000);
+      await sleep(250);
     }
   }
 
@@ -80,7 +80,7 @@ export class Page {
         // keep polling
       }
       if (Date.now() > end) throw new Error(`timed out: ${expression}`);
-      await sleep(500);
+      await sleep(100);
     }
   }
 

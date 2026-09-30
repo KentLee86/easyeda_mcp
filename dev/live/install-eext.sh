@@ -17,8 +17,11 @@ ui() { "$here/node.sh" node dev/live/ui.mjs "$@"; }
 ui "Advanced" "Extensions Manager(E)..." "Import"
 docker exec "$name" bash -c '
 export DISPLAY=:${XVFB_DISPLAY:-77}
-for _ in $(seq 1 30); do w=$(xdotool search --onlyvisible --name "^Open Files$" | head -1); [ -n "$w" ] && break; sleep 1; done
+# --sync blocks until the dialog window exists
+w=$(timeout 30 xdotool search --sync --onlyvisible --name "^Open Files$" | head -1 || true)
 [ -n "$w" ] || { echo "file dialog did not open" >&2; exit 3; }
+# GTK needs a moment after mapping and after opening the location bar; shorter
+# waits drop keystrokes (measured), so these stay.
 xdotool windowfocus --sync "$w"; sleep 0.5
 xdotool key ctrl+l; sleep 0.3; xdotool key ctrl+a
 xdotool type --delay 20 "$1"; sleep 0.3; xdotool key Return' _ "$eext"

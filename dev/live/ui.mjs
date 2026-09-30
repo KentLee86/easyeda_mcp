@@ -18,7 +18,8 @@ for (const step of process.argv.slice(2)) {
     } catch (error) {
       if (!optional) throw error;
     }
-    await sleep(1200);
+    // The next clickText already waits for its target; this only lets menus open.
+    await sleep(250);
   }
   optional = false;
 }
