@@ -116,16 +116,26 @@ async function addPages() {
   }
 }
 
+// Built-in pages kept after the layer pages (EasyEDA lists them last).
+const KEEP_BUILTINS = ["BOM"];
+
 async function disableBuiltins() {
-  for (const name of BUILTIN_PAGES) {
+  for (const name of BUILTIN_PAGES.filter((item) => !KEEP_BUILTINS.includes(item))) {
     const box = `(${rowByName(name)})?.querySelector('input[type=checkbox]')`;
     if (await page.eval(`!!(${box}) && (${box}).checked`)) {
       await clickJs(box);
       await sleep(200);
     }
   }
-  const selected = await page.eval(`Array.from((${MAIN}).querySelectorAll('tr')).filter(row => row.querySelector('td[data-col-key=name]') && row.querySelector('input[type=checkbox]')?.checked).map(row => row.querySelector('td[data-col-key=name]').textContent.trim())`);
-  if (selected.length !== PAGES.length) throw new Error(`unexpected selected pages: ${JSON.stringify(selected)}`);
+  for (const name of KEEP_BUILTINS) {
+    const box = `(${rowByName(name)})?.querySelector('input[type=checkbox]')`;
+    if (await page.eval(`!!(${box}) && !(${box}).checked`)) {
+      await clickJs(box);
+      await sleep(200);
+    }
+  }
+  const final = await page.eval(`Array.from((${MAIN}).querySelectorAll('tr')).filter(row => row.querySelector('td[data-col-key=name]') && row.querySelector('input[type=checkbox]')?.checked).map(row => row.querySelector('td[data-col-key=name]').textContent.trim())`);
+  if (final.length !== PAGES.length + KEEP_BUILTINS.length) throw new Error(`unexpected selected pages: ${JSON.stringify(final)}`);
 }
 
 const started = Date.now();
@@ -140,5 +150,5 @@ await clickJs(`Array.from((${MAIN}).querySelectorAll('button')).find(b => b.titl
 const pdf = Buffer.from(base64, "base64");
 if (!pdf.subarray(0, 5).equals(Buffer.from("%PDF-"))) throw new Error("EasyEDA did not return a PDF");
 fs.writeFileSync(out, pdf);
-console.log(`${out} ${pdf.length} B, pages: ${PAGES.map(([name]) => name).join(" | ")} (${Date.now() - started} ms)`);
+console.log(`${out} ${pdf.length} B, pages: ${[...PAGES.map(([name]) => name), ...KEEP_BUILTINS].join(" | ")} (${Date.now() - started} ms)`);
 page.close();

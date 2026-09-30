@@ -111,12 +111,25 @@ def main() -> None:
     right, top = min(page_w, right), min(page_h, top)
 
     with tempfile.TemporaryDirectory() as tmp:
-        marked = Path(tmp) / "cropbox.pdf"
-        subprocess.run(["gs", "-q", "-o", str(marked), "-sDEVICE=pdfwrite",
-                        "-c", f"[/CropBox [{left:.2f} {bottom:.2f} {right:.2f} {top:.2f}] /PAGES pdfmark",
-                        "-f", str(args.source)], check=True)
+        # Crop only board drawings: pages with the outline page's size. Others (e.g.
+        # the BOM table page) keep their own size.
+        total = int(re.search(r"Pages:\s+(\d+)", subprocess.run(["pdfinfo", str(args.source)], check=True, capture_output=True, text=True).stdout).group(1))
+        subprocess.run(["pdfseparate", str(args.source), f"{tmp}/src-%03d.pdf"], check=True)
+        pieces = []
+        for number in range(1, total + 1):
+            src = Path(tmp) / f"src-{number:03d}.pdf"
+            if page_size(src, 1) != (page_w, page_h):
+                pieces.append(str(src))
+                continue
+            marked = Path(tmp) / f"mark-{number:03d}.pdf"
+            subprocess.run(["gs", "-q", "-o", str(marked), "-sDEVICE=pdfwrite",
+                            "-c", f"[/CropBox [{left:.2f} {bottom:.2f} {right:.2f} {top:.2f}] /PAGES pdfmark",
+                            "-f", str(src)], check=True)
+            done = Path(tmp) / f"crop-{number:03d}.pdf"
+            subprocess.run(["gs", "-q", "-o", str(done), "-sDEVICE=pdfwrite", "-dUseCropBox", str(marked)], check=True)
+            pieces.append(str(done))
         cropped = Path(tmp) / "cropped.pdf"
-        subprocess.run(["gs", "-q", "-o", str(cropped), "-sDEVICE=pdfwrite", "-dUseCropBox", str(marked)], check=True)
+        subprocess.run(["pdfunite", *pieces, str(cropped)], check=True)
 
         reference = render_gray(cropped, args.reference_page)
         pages = int(re.search(r"Pages:\s+(\d+)", subprocess.run(["pdfinfo", str(cropped)], check=True, capture_output=True, text=True).stdout).group(1))
@@ -124,6 +137,9 @@ def main() -> None:
         parts = []
         for number in range(1, pages + 1):
             part = Path(tmp) / f"page-{number:03d}.pdf"
+            if page_size(part, 1) != page_size(cropped, args.reference_page):
+                parts.append(str(part))   # not a board drawing
+                continue
             fix, scores = orientation(cropped, number, reference)
             if fix != "none":
                 fixed = Path(tmp) / f"fixed-{number:03d}.pdf"
