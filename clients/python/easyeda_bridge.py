@@ -20,6 +20,7 @@ import os
 import pathlib
 import urllib.error
 import urllib.request
+import zipfile
 from typing import Any, Iterable, Optional, Sequence
 
 DEFAULT_HTTP_PORT = 8766
@@ -175,6 +176,72 @@ class Bridge:
         normalized = [c if isinstance(c, dict) else {"path": c[0], "args": list(c[1]) if len(c) > 1 else []} for c in calls]
         result = self.call("apiBatch", {"calls": normalized, "stopOnError": stop_on_error}, timeout_ms or 60_000)
         return result["results"]
+
+    # -- exports, packages, design check (run by the hub; same catalog as the CLI) --
+
+    def exports(self) -> dict:
+        """The export catalog: {"supported": [...], "unsupported": [{kind, reason}, ...]}."""
+        return self._request("GET", "/v1/exports")["result"]
+
+    def export(self, kind: str, out: Optional[os.PathLike] = None, format: Optional[str] = None,
+               scope: Optional[str] = None, overwrite: bool = False) -> dict:
+        """Export one catalog kind (gerber, step, pnp, bom, ibom, ...) and write it.
+
+        `out` is a file path or a directory (default: current directory). The hub
+        switches EasyEDA to the PCB/schematic the kind needs and back.
+        """
+        body: dict = {"kind": kind}
+        if format:
+            body["format"] = format
+        if scope:
+            body["scope"] = scope
+        result = self._request("POST", "/v1/ops/export", body, timeout_s=600)["result"]
+        target = pathlib.Path(out) if out is not None else pathlib.Path.cwd()
+        if target.is_dir() or str(out or "").endswith(("/", os.sep)) or out is None:
+            target = target / result["fileName"]
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with open(target, "wb" if overwrite else "xb") as handle:
+            handle.write(base64.b64decode(result["base64"]))
+        info = {key: value for key, value in result.items() if key != "base64"}
+        info["path"] = str(target)
+        return info
+
+    def package(self, out: Optional[os.PathLike] = None, kinds: Optional[Sequence[str]] = None,
+                preset: Optional[str] = None, zip: bool = False) -> dict:
+        """Fabrication/assembly package: files + manifest.json in a folder (and <folder>.zip).
+
+        Presets: fab, assembly, docs, all. Returns {"dir", "manifest", "zip"?}.
+        """
+        body: dict = {}
+        if kinds:
+            body["kinds"] = list(kinds)
+        if preset:
+            body["preset"] = preset
+        result = self._request("POST", "/v1/ops/package", body, timeout_s=1800)["result"]
+        manifest = result["manifest"]
+        if out is None:
+            stamp = manifest["generatedAt"].replace("-", "").replace(":", "").split(".")[0].replace("T", "-")
+            out = pathlib.Path.cwd() / f"easyeda-package-{manifest['project']}-{stamp}"
+        directory = pathlib.Path(out)
+        directory.mkdir(parents=True, exist_ok=True)
+        blobs = {item["fileName"]: base64.b64decode(item["base64"]) for item in result["files"]}
+        for name, data in blobs.items():
+            (directory / name).write_bytes(data)
+        manifest_text = json.dumps(manifest, indent=2) + "\n"
+        (directory / "manifest.json").write_text(manifest_text, encoding="utf-8")
+        answer = {"dir": str(directory), "manifest": manifest}
+        if zip:
+            zip_path = directory.with_name(directory.name + ".zip")
+            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as archive:
+                for name, data in blobs.items():
+                    archive.writestr(f"{directory.name}/{name}", data)
+                archive.writestr(f"{directory.name}/manifest.json", manifest_text)
+            answer["zip"] = str(zip_path)
+        return answer
+
+    def check(self, strict: bool = False) -> dict:
+        """DRC + schematic-vs-PCB netlist comparison + unconnected pins. report["ok"] is the verdict."""
+        return self._request("POST", "/v1/ops/check", {"strict": strict}, timeout_s=600)["result"]
 
     def describe(self, namespace: Optional[str] = None) -> dict:
         return self.call("apiDescribe", {"namespace": namespace} if namespace else {})

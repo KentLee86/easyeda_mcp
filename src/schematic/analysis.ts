@@ -32,6 +32,8 @@ export type SchematicComponent = {
   footprint?: unknown;
   manufacturer?: string;
   manufacturerId?: string;
+  /** false for schematic-only items (e.g. a "!PCB1" BOM line for the bare board). */
+  addIntoPcb?: boolean;
   position: Position;
   raw?: unknown;
 };
@@ -1013,6 +1015,7 @@ function normalizeComponent(raw: unknown, includeRaw: boolean): SchematicCompone
     footprint: item.footprint,
     manufacturer: stringValue(item.manufacturer ?? otherProperty.Manufacturer),
     manufacturerId: stringValue(item.manufacturerId ?? otherProperty["Manufacturer Part"]),
+    ...(typeof item.addIntoPcb === "boolean" ? { addIntoPcb: item.addIntoPcb } : {}),
     position: {
       x: numberValue(item.x),
       y: numberValue(item.y)

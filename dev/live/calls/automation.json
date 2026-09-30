@@ -1,0 +1,3 @@
+[["easyeda_export",{"kind":"pnp","outputPath":"/repo/dev/live/.work/mcp/","overwrite":true},250],
+ ["easyeda_package",{"preset":"fab","outDir":"/repo/dev/live/.work/mcp-fab"},300],
+ ["easyeda_design_check",{},300]]

@@ -1,7 +1,11 @@
 import * as z from "zod/v4";
 import type { BridgeClient } from "../bridge/types.js";
 import { ok, fail } from "./toolResult.js";
-import { isExportedFile, writeExport, type ExportKind } from "./exportFiles.js";
+import { defaultExportDir, isExportedFile, resolveExportTarget, writeExport, type ExportKind } from "./exportFiles.js";
+import { EXPORT_CATALOG, UNSUPPORTED_EXPORTS } from "./exportCatalog.js";
+import { collectPackage, defaultPackageDir, exportKind, formatDesignCheck, PACKAGE_PRESETS, runDesignCheck, writePackage } from "./exportOps.js";
+import { mkdir, writeFile } from "node:fs/promises";
+import nodePath from "node:path";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { PROTOCOL_VERSION, type EditorStatus } from "../protocol/messages.js";
 import { SERVER_VERSION } from "../version.js";
@@ -604,6 +608,121 @@ export function registerEasyEdaTools(server: McpServer, bridge: BridgeClient): v
           ],
           structuredContent: info
         };
+      } catch (error) {
+        return fail(error);
+      }
+    }
+  );
+
+  const catalogText = EXPORT_CATALOG.map((entry) => `${entry.kind} (${entry.title}${entry.document === "schematic" ? ", schematic" : ""})`).join("; ");
+  const unsupportedText = UNSUPPORTED_EXPORTS.map((item) => item.kind).join(", ");
+
+  server.registerTool(
+    "easyeda_export",
+    {
+      title: "Export a file from EasyEDA Pro",
+      description: `Exports one file from the active project and saves it locally. Kinds: ${catalogText}. ` +
+        `Not available (broken in EasyEDA Pro 3.2.149): ${unsupportedText}. ` +
+        "The tool switches the editor to the PCB or schematic the kind needs and switches back afterwards. Text files (netlist, pnp, BOM csv/json, ...) are also returned inline.",
+      inputSchema: {
+        kind: z.string().min(1).describe(`One of: ${EXPORT_CATALOG.map((entry) => entry.kind).join(", ")}.`),
+        format: z.enum(["csv", "json", "xlsx"]).optional().describe("BOM only (default csv)."),
+        scope: z.enum(["pcb", "schematic"]).optional().describe("bom/netlist/pdf: take it from the schematic instead of the PCB."),
+        outputPath: z.string().min(1).optional().describe("File path, or a directory ending in / . Default: $EASYEDA_MCP_EXPORT_DIR or <tmp>/easyeda-mcp-exports/."),
+        overwrite: z.boolean().default(false),
+        maxInlineChars: z.number().int().min(0).max(200_000).default(20_000),
+        timeoutMs: DefaultTimeoutSchema.default(120_000)
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false
+      }
+    },
+    async ({ kind, format, scope, outputPath, overwrite, maxInlineChars, timeoutMs }) => {
+      try {
+        const file = await exportKind(bridge, kind, { format, scope, timeoutMs });
+        const target = await resolveExportTarget(outputPath, file.fileName);
+        await mkdir(nodePath.dirname(target), { recursive: true });
+        await writeFile(target, file.data, { flag: overwrite ? "w" : "wx" });
+        return ok(`Saved ${file.kind} export to ${target} (${file.data.length} bytes, ${file.ms} ms).`, {
+          result: {
+            kind: file.kind,
+            path: target,
+            bytes: file.data.length,
+            ms: file.ms,
+            document: file.document,
+            restoredDocument: file.restored,
+            ...(file.note ? { note: file.note } : {}),
+            ...(file.text === undefined ? {} : { text: file.text.slice(0, maxInlineChars), truncated: file.text.length > maxInlineChars })
+          }
+        });
+      } catch (error) {
+        return fail(error);
+      }
+    }
+  );
+
+  server.registerTool(
+    "easyeda_package",
+    {
+      title: "Build a fabrication/assembly package",
+      description: "Exports several files into one folder named <project>-<kind>.<ext> plus manifest.json (sha256, sizes, timings, DRC summary, failures), optionally zipped. " +
+        `Presets: ${Object.entries(PACKAGE_PRESETS).filter(([name]) => name !== "all").map(([name, kinds]) => `${name} = ${kinds.join(", ")}`).join("; ")}; all = every supported kind. ` +
+        "Switches the editor to the PCB and schematic once each (DRC runs on the PCB) and restores the original document. Per-file failures are recorded, not fatal.",
+      inputSchema: {
+        outDir: z.string().min(1).optional().describe("Target folder. Default: easyeda-package-<project>-<timestamp> under $EASYEDA_MCP_EXPORT_DIR or <tmp>/easyeda-mcp-exports/."),
+        preset: z.enum(["fab", "assembly", "docs", "all"]).optional().describe("Default fab when kinds is not given."),
+        kinds: z.array(z.string().min(1)).min(1).optional().describe("Explicit kinds instead of a preset."),
+        zip: z.boolean().default(false).describe("Also write <folder>.zip.")
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false
+      }
+    },
+    async ({ outDir, preset, kinds, zip }) => {
+      try {
+        const collected = await collectPackage(bridge, { kinds, preset });
+        const written = await writePackage(collected, {
+          outDir: outDir ?? defaultPackageDir(collected.manifest.project, new Date(collected.manifest.generatedAt), defaultExportDir()),
+          zip
+        });
+        const { manifest } = written;
+        return ok(`Wrote ${manifest.files.length} file(s) to ${written.dir}${manifest.failures.length ? ` (${manifest.failures.length} failed)` : ""}${manifest.drc ? `; DRC ${manifest.drc.errorCount} error(s)` : ""}.`, {
+          dir: written.dir,
+          ...(written.zipPath ? { zip: written.zipPath } : {}),
+          manifest
+        });
+      } catch (error) {
+        return fail(error);
+      }
+    }
+  );
+
+  server.registerTool(
+    "easyeda_design_check",
+    {
+      title: "Check the design (DRC + schematic vs PCB)",
+      description: "Runs DRC, compares schematic connectivity (all pages) with the PCB netlist export as a pin partition (split/merged nets, net-name mismatches, parts missing on either side), and counts unconnected schematic pins. " +
+        "Does not change the design; it switches the editor to the PCB and the schematic and then back to the original document.",
+      inputSchema: {
+        strict: z.boolean().default(false).describe("Also count PCB-only unconnected pads (mounting holes, fiducials) missing from the schematic.")
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false
+      }
+    },
+    async ({ strict }) => {
+      try {
+        const report = await runDesignCheck(bridge, { strict });
+        return ok(formatDesignCheck(report).trimEnd(), { report });
       } catch (error) {
         return fail(error);
       }

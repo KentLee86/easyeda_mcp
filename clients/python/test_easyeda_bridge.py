@@ -49,6 +49,8 @@ class FakeHub(BaseHTTPRequestHandler):
             return
         if self.path == "/v1/status":
             self._send(200, {"connected": True, "activeDocumentType": "pcb", "updatedAt": ""})
+        elif self.path == "/v1/exports":
+            self._send(200, {"ok": True, "result": {"supported": [{"kind": "gerber"}], "unsupported": [{"kind": "ipc2581", "reason": "never resolves"}]}})
         else:
             self._send(404, {"ok": False, "error": {"code": "not_found", "message": self.path}})
 
@@ -59,6 +61,21 @@ class FakeHub(BaseHTTPRequestHandler):
             self._send(415, {"ok": False, "error": {"code": "unsupported_media_type", "message": ""}})
             return
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        if self.path.startswith("/v1/ops/"):
+            FakeHub.calls.append((self.path, body))
+            b64 = lambda data: base64.b64encode(data).decode()
+            if self.path == "/v1/ops/export":
+                if body["kind"] == "ipc2581":
+                    self._send(400, {"ok": False, "error": {"code": "export_unsupported", "message": "never resolves"}})
+                    return
+                result = {"kind": body["kind"], "fileName": f"B-{body['kind']}.step", "size": 4, "ms": 5, "base64": b64(b"STEP")}
+            elif self.path == "/v1/ops/package":
+                result = {"manifest": {"project": "B", "generatedAt": "2026-09-30T12:00:00.000Z", "files": [{"kind": "gerber", "path": "B-gerber.zip"}], "failures": []},
+                          "files": [{"kind": "gerber", "fileName": "B-gerber.zip", "base64": b64(b"PK\x03\x04zz")}]}
+            else:
+                result = {"ok": False, "findings": 1, "drc": {"ok": False, "errorCount": 1}}
+            self._send(200, {"ok": True, "result": result})
+            return
         method, params = body["method"], body.get("params") or {}
         FakeHub.calls.append((method, params))
         comps = FakeHub.components
@@ -147,6 +164,34 @@ class BridgeClientTest(unittest.TestCase):
         self.assertEqual(out.read_bytes(), b"PNG!")
         self.assertEqual(FakeHub.calls[-1], ("renderImage", {"primitiveIds": ["e12"]}))
         self.assertEqual(self.eda.render(region=(0, 10, 0, 5)), b"PNG!")
+
+    def test_exports_catalog_and_export(self):
+        self.assertEqual(self.eda.exports()["unsupported"][0]["kind"], "ipc2581")
+        out_dir = self.dir / "exp"
+        out_dir.mkdir(exist_ok=True)
+        info = self.eda.export("step", out=out_dir)
+        self.assertEqual(pathlib.Path(info["path"]).read_bytes(), b"STEP")
+        self.assertNotIn("base64", info)
+        with self.assertRaises(FileExistsError):
+            self.eda.export("step", out=out_dir)
+        self.eda.export("step", out=out_dir, overwrite=True)
+        with self.assertRaises(BridgeError) as ctx:
+            self.eda.export("ipc2581", out=out_dir)
+        self.assertEqual(ctx.exception.code, "export_unsupported")
+
+    def test_package_writes_files_manifest_and_zip(self):
+        import zipfile
+        result = self.eda.package(out=self.dir / "pkg", preset="fab", zip=True)
+        self.assertEqual(FakeHub.calls[-1], ("/v1/ops/package", {"preset": "fab"}))
+        self.assertEqual((self.dir / "pkg" / "B-gerber.zip").read_bytes(), b"PK\x03\x04zz")
+        self.assertEqual(json.loads((self.dir / "pkg" / "manifest.json").read_text())["project"], "B")
+        with zipfile.ZipFile(result["zip"]) as archive:
+            self.assertEqual(sorted(archive.namelist()), ["pkg/B-gerber.zip", "pkg/manifest.json"])
+
+    def test_check(self):
+        report = self.eda.check(strict=True)
+        self.assertFalse(report["ok"])
+        self.assertEqual(FakeHub.calls[-1], ("/v1/ops/check", {"strict": True}))
 
     def test_config_dir_resolution(self):
         self.assertEqual(config_dir({"EASYEDA_MCP_CONFIG_DIR": "/x/y"}), pathlib.Path("/x/y"))

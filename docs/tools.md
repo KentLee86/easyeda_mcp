@@ -19,7 +19,10 @@ Use this page when you know what you want to do and need the right MCP tool.
 | Run generic schematic checks | `easyeda_validate_schematic_area` |
 | Check exact connection rules | `easyeda_verify_connections` |
 | Move the editor to a part | `easyeda_navigate_component` |
-| Export manufacturing files | `easyeda_export_bom`, `easyeda_export_netlist`, `easyeda_export_gerber`, `easyeda_export_pdf` |
+| Export any manufacturing/documentation file (gerber, STEP, pick and place, iBOM, ODB++, ...) | `easyeda_export` |
+| Build a fab/assembly package with a manifest | `easyeda_package` |
+| Check the design (DRC + schematic vs PCB) | `easyeda_design_check` |
+| Export BOM/netlist/Gerber/PDF (older per-kind tools) | `easyeda_export_bom`, `easyeda_export_netlist`, `easyeda_export_gerber`, `easyeda_export_pdf` |
 | Save/import/autoroute/autolayout | `easyeda_confirmed_action` |
 | Read the whole PCB as data | `easyeda_pcb_snapshot` |
 | Run DRC | `easyeda_pcb_drc` |
@@ -250,6 +253,31 @@ Exports Gerber fabrication data (zip) from the active PCB. PCB only.
 ### `easyeda_export_pdf`
 
 Exports a PDF from the active schematic or PCB document.
+
+### `easyeda_export`
+
+Exports one file by `kind` from a catalog shared with the CLI and the Python client, and saves it (default `$EASYEDA_MCP_EXPORT_DIR` or `<tmp>/easyeda-mcp-exports/`, or `outputPath`). The tool switches the editor to the PCB or schematic the kind needs and back afterwards. Text files come back inline too.
+
+| kind | file | kind | file |
+| --- | --- | --- | --- |
+| `gerber` | Gerber + drill zip | `sch-pdf` | schematic PDF, all pages |
+| `step` | 3D STEP | `sch-svg` | schematic SVG zip |
+| `obj` | 3D OBJ zip | `sch-png` | schematic PNG zip |
+| `pnp` | pick and place csv (mm) | `ipc356` | IPC-D-356A |
+| `bom` | BOM csv/json/xlsx | `odb` | ODB++ zip |
+| `netlist` | EasyEDA `.enet` (from the PCB) | `ibom` | interactive BOM html |
+| `dxf` | DXF | `dsn` | Specctra DSN |
+| `pcb-pdf` | PCB PDF | `flying-probe`, `pcb-info`, `altium`, `pads`, `testpoint` | as named |
+
+`ipc2581`, `sch-dxf`, `3d-shell`, `autoroute-json`, and `spice` are refused (`export_unsupported`) because they hang or return nothing in EasyEDA Pro 3.2.149. `easyeda export --list` prints the full catalog with timings.
+
+### `easyeda_package`
+
+Exports several kinds into one folder (`<project>-<kind>.<ext>`) plus `manifest.json` with sha256, sizes, per-file timings, DRC summary, part counts, and per-file failures, and optionally a zip. Presets: `fab` (gerber, pcb-pdf, netlist, ipc356, odb), `assembly` (bom, pnp, step, ibom), `docs` (sch-pdf, pcb-pdf, sch-svg, step), `all`. One switch to the PCB and one to the schematic, then back to the original document.
+
+### `easyeda_design_check`
+
+DRC, then schematic connectivity (all pages) compared with the PCB netlist export as a pin partition: split nets, merged nets, net-name mismatches, parts missing on either side. Also counts unconnected schematic pins. PCB-only parts with no connected pads (mounting holes, fiducials) are reported as information only. Does not modify the design.
 
 ## PCB Data and the Generic API
 

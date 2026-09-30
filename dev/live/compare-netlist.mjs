@@ -38,101 +38,19 @@ if (!rawPath || !netlistPath) {
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const { buildSchematicSnapshot } = await import(path.join(here, "../../dist/schematic/analysis.js"));
+// The comparison itself lives in src/schematic/compareNetlist.ts (also used by `easyeda check`).
+const { compareNetlist } = await import(path.join(here, "../../dist/schematic/compareNetlist.js"));
 
 const raw = JSON.parse(readFileSync(rawPath, "utf8"));
 const netlist = JSON.parse(readFileSync(netlistPath, "utf8"));
 const snapshot = buildSchematicSnapshot({ ...raw, includeRaw: false });
+const result = compareNetlist(snapshot, netlist, { strict });
+const { counters, stats, notes } = result;
+const discrepancies = result.discrepancies.map((item) => `[${item.kind}] ${item.message}`);
 
-const key = (designator, pinNumber) => `${designator}.${pinNumber}`;
-const isAutoName = (name) => /^Net/.test(name);
-
-// Ground truth: pin -> Pro net ("" = unconnected).
-const proNetByPin = new Map();
-for (const component of Object.values(netlist.components ?? {})) {
-  const designator = component?.props?.Designator;
-  for (const [pinKey, info] of Object.entries(component?.pinInfoMap ?? {})) {
-    proNetByPin.set(key(designator, info?.number ?? pinKey), info?.net ?? "");
-  }
-}
-
-// Snapshot: pin -> node / net. Only real parts (netflags/netports are not netlist components).
-const partIds = new Set(
-  snapshot.components
-    .filter((item) => item.componentType === "part")
-    .map((item) => `${item.page?.uuid ?? ""}\u0000${item.primitiveId}`)
-);
-const snapPins = new Map();
-for (const pin of snapshot.pins) {
-  if (!partIds.has(`${pin.page?.uuid ?? ""}\u0000${pin.componentPrimitiveId}`)) continue;
-  snapPins.set(key(pin.componentDesignator, pin.pinNumber), pin);
-}
-
-const discrepancies = [];
-const counters = { split: 0, merged: 0, name: 0, missingInSnapshot: 0, missingInNetlist: 0 };
-const notes = [];
-const report = (kind, message) => {
-  counters[kind] += 1;
-  discrepancies.push(`[${kind}] ${message}`);
-};
-
-for (const pinKey of proNetByPin.keys()) {
-  if (snapPins.has(pinKey)) continue;
-  if (!proNetByPin.get(pinKey) && !strict) notes.push(pinKey);
-  else report("missingInSnapshot", `${pinKey} (Pro net ${JSON.stringify(proNetByPin.get(pinKey))})`);
-}
-for (const pinKey of snapPins.keys()) {
-  if (!proNetByPin.has(pinKey)) report("missingInNetlist", pinKey);
-}
-
-const compared = [...proNetByPin.keys()].filter((pinKey) => snapPins.has(pinKey));
-const nodeOf = (pinKey) => snapPins.get(pinKey).nodeId;
-
-// split
-const pinsByProNet = new Map();
-for (const pinKey of compared) {
-  const net = proNetByPin.get(pinKey);
-  if (!net) continue;
-  pinsByProNet.set(net, [...(pinsByProNet.get(net) ?? []), pinKey]);
-}
-for (const [net, pins] of [...pinsByProNet].sort(([a], [b]) => a.localeCompare(b))) {
-  if (pins.length < 2) continue;
-  const nodes = new Set(pins.map((pinKey) => nodeOf(pinKey) ?? `<unconnected ${pinKey}>`));
-  if (nodes.size > 1) {
-    const detail = pins.map((pinKey) => `${pinKey}=${nodeOf(pinKey) ?? "-"}`).join(", ");
-    report("split", `Pro net ${net} spans ${nodes.size} snapshot nodes: ${detail}`);
-  }
-}
-
-// merged
-const pinsByNode = new Map();
-for (const pinKey of compared) {
-  const node = nodeOf(pinKey);
-  if (!node) continue;
-  pinsByNode.set(node, [...(pinsByNode.get(node) ?? []), pinKey]);
-}
-for (const [node, pins] of pinsByNode) {
-  const proNets = new Set(pins.map((pinKey) => proNetByPin.get(pinKey) || `<unconnected ${pinKey}>`));
-  if (proNets.size > 1) {
-    const detail = pins.map((pinKey) => `${pinKey}=${proNetByPin.get(pinKey) || "-"}`).join(", ");
-    report("merged", `snapshot node ${node} joins ${proNets.size} Pro nets: ${detail}`);
-  }
-}
-
-// names
-for (const pinKey of compared) {
-  const proNet = proNetByPin.get(pinKey);
-  if (!proNet || isAutoName(proNet)) continue;
-  const snapNet = snapPins.get(pinKey).net;
-  if ((snapNet ?? "").toLowerCase() !== proNet.toLowerCase()) {
-    report("name", `${pinKey}: Pro ${proNet} vs snapshot ${snapNet ?? "-"}`);
-  }
-}
-
-const proConnected = compared.filter((pinKey) => proNetByPin.get(pinKey)).length;
-const snapConnected = compared.filter((pinKey) => snapPins.get(pinKey).connected).length;
-console.log(`pins compared: ${compared.length} (Pro netlist ${proNetByPin.size}, snapshot parts ${snapPins.size})`);
-console.log(`connected pins: Pro ${proConnected}, snapshot ${snapConnected}`);
-console.log(`Pro nets with >=2 pins: ${[...pinsByProNet.values()].filter((pins) => pins.length >= 2).length}`);
+console.log(`pins compared: ${stats.pinsCompared} (Pro netlist ${stats.netlistPins}, snapshot parts ${stats.snapshotPins})`);
+console.log(`connected pins: Pro ${stats.connectedPins.pro}, snapshot ${stats.connectedPins.snapshot}`);
+console.log(`Pro nets with >=2 pins: ${stats.proNetsWithTwoOrMorePins}`);
 console.log(
   `split nets: ${counters.split}, merged nodes: ${counters.merged}, name mismatches: ${counters.name}, ` +
     `missing in snapshot: ${counters.missingInSnapshot}, missing in netlist: ${counters.missingInNetlist}`

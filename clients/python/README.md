@@ -19,6 +19,10 @@ snap = eda.pcb_snapshot(["components", "tracks"])
 eda.move("U1", dx=50, rotation=90)             # mil; returns before/after
 eda.drc()
 eda.render(designator="U1", out="u1.png")      # PNG of the canvas (changes the view)
+eda.exports()                                  # export catalog (kinds, unsupported + reasons)
+eda.export("step", out="out/")                 # gerber, pnp, bom, ibom, odb, ...
+eda.package(preset="assembly", zip=True)       # folder + manifest.json (+ zip)
+eda.check()["ok"]                              # DRC + schematic vs PCB netlist
 ```
 
 Errors raise `BridgeError` with `.code` (`bridge_unavailable`, `api_forbidden`,

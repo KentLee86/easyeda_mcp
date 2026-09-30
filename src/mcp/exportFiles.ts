@@ -76,6 +76,11 @@ function looksTabSeparated(text: string): boolean {
   return header.includes("\t") && !header.includes(",");
 }
 
+/** Target path for an export: default dir, a directory (trailing / or existing dir), or a file path. */
+export async function resolveExportTarget(outputPath: string | undefined, fileName: string): Promise<string> {
+  return resolveTarget(outputPath, fileName);
+}
+
 async function resolveTarget(outputPath: string | undefined, fileName: string): Promise<string> {
   if (!outputPath) {
     return path.join(defaultExportDir(), fileName);
@@ -87,29 +92,17 @@ async function resolveTarget(outputPath: string | undefined, fileName: string): 
 
 export async function writeExport(
   file: ExportedFile,
-  options: { kind: ExportKind; format?: string; outputPath?: string; overwrite?: boolean; maxInlineChars?: number }
+  options: {
+    kind: ExportKind | string;
+    format?: string;
+    outputPath?: string;
+    overwrite?: boolean;
+    maxInlineChars?: number;
+    /** Override text handling: BOM conversion, plain text, or raw bytes. Default from kind. */
+    mode?: "bom" | "text" | "binary";
+  }
 ): Promise<WrittenExport> {
-  let data: Buffer = Buffer.from(file.base64, "base64");
-  let fileName = file.fileName;
-  let text: string | undefined;
-  let note: string | undefined;
-
-  const isText = options.kind === "netlist" || (options.kind === "bom" && options.format !== "xlsx");
-  if (isText) {
-    text = decodeText(data);
-    if (options.kind === "bom" && options.format === "csv" && looksTabSeparated(text)) {
-      text = tsvToCsv(text);
-      note = "EasyEDA returned tab-separated UTF-16 text; converted to UTF-8 CSV.";
-    } else if (options.kind === "bom" && options.format === "json" && looksTabSeparated(text)) {
-      text = JSON.stringify(tsvToRows(text), null, 2);
-      note = "EasyEDA returned a tab-separated BOM; converted to a JSON array of rows.";
-    }
-    data = Buffer.from(text, "utf8");
-  }
-  if (options.kind === "bom" && options.format && !fileName.toLowerCase().endsWith(`.${options.format}`)) {
-    fileName = `${fileName.replace(/\.[^.]*$/, "")}.${options.format}`;
-  }
-
+  const { data, fileName, text, note } = prepareExport(file, options);
   const target = await resolveTarget(options.outputPath, fileName);
   await mkdir(path.dirname(target), { recursive: true });
   await writeFile(target, data, { flag: options.overwrite ? "w" : "wx" });
@@ -126,4 +119,34 @@ export async function writeExport(
     }),
     ...(note ? { note } : {})
   };
+}
+
+/** Decode/convert exported bytes (BOM TSV to CSV/JSON, UTF-16 text to UTF-8) without writing them. */
+export function prepareExport(
+  file: ExportedFile,
+  options: { kind: ExportKind | string; format?: string; mode?: "bom" | "text" | "binary" }
+): { data: Buffer; fileName: string; text?: string; note?: string } {
+  let data: Buffer = Buffer.from(file.base64, "base64");
+  let fileName = file.fileName;
+  let text: string | undefined;
+  let note: string | undefined;
+
+  const mode = options.mode ?? (options.kind === "bom" ? "bom" : options.kind === "netlist" ? "text" : "binary");
+  const isBom = mode === "bom";
+  const isText = mode === "text" || (isBom && options.format !== "xlsx");
+  if (isText) {
+    text = decodeText(data);
+    if (isBom && options.format === "csv" && looksTabSeparated(text)) {
+      text = tsvToCsv(text);
+      note = "EasyEDA returned tab-separated UTF-16 text; converted to UTF-8 CSV.";
+    } else if (isBom && options.format === "json" && looksTabSeparated(text)) {
+      text = JSON.stringify(tsvToRows(text), null, 2);
+      note = "EasyEDA returned a tab-separated BOM; converted to a JSON array of rows.";
+    }
+    data = Buffer.from(text, "utf8");
+  }
+  if (isBom && options.format && !fileName.toLowerCase().endsWith(`.${options.format}`)) {
+    fileName = `${fileName.replace(/\.[^.]*$/, "")}.${options.format}`;
+  }
+  return { data, fileName, ...(text === undefined ? {} : { text }), ...(note ? { note } : {}) };
 }

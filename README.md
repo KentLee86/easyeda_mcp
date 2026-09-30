@@ -105,6 +105,9 @@ easyeda pcb snapshot --include components --out board.json
 easyeda pcb move U1 --dx 50 --rotation 90
 easyeda call pcb_PrimitiveComponent.getAll
 easyeda pcb drc
+easyeda export step                         # or gerber, pnp, bom, ibom, odb, ... (easyeda export --list)
+easyeda package --preset fab --zip          # folder + manifest.json for the fab house
+easyeda check                               # DRC + schematic vs PCB netlist, CI exit codes
 ```
 
 `easyeda` talks to a local hub (HTTP on `127.0.0.1:8766`, bearer token in `~/.config/easyeda-mcp/token`) served by the running MCP server or a background daemon it starts on demand. Several MCP servers can share one extension connection. See [CLI, HTTP hub, and Python client](./docs/cli.md) for commands, the HTTP API, the Python client in `clients/python/`, and the security model.

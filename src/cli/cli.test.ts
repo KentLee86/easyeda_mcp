@@ -5,7 +5,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { BridgeHost } from "../bridge/BridgeHost.js";
 import { connectFakeExtension, silentLogger, waitFor } from "../bridge/fakeExtension.testutil.js";
 import { CliUsageError, joinNegativeNumbers, parseCli, parseJsonArg } from "./args.js";
-import { runCli } from "./main.js";
+import { runCli, runEditorCommand } from "./main.js";
+import { fakeEditor } from "../mcp/fakeEditor.testutil.js";
 
 const cleanups: Array<() => Promise<void> | void> = [];
 
@@ -46,6 +47,13 @@ describe("CLI argument parsing", () => {
       ["pcb", "drc", "--out", "x"],
       ["export", "gerber", "--format", "csv"],
       ["export", "zip"],
+      ["export", "ipc2581"],
+      ["export", "step", "--format", "csv"],
+      ["export", "gerber", "--scope", "schematic"],
+      ["package", "--preset", "nope"],
+      ["package", "--kinds", "gerber", "--preset", "fab"],
+      ["package", "--kinds", "sch-dxf"],
+      ["check", "--out", "x"],
       ["render"],
       ["render", "--out", "a.png", "--region", "1,2"],
       ["status", "--start", "--no-start"],
@@ -69,7 +77,12 @@ describe("CLI argument parsing", () => {
       command: { name: "pcb-snapshot", include: ["components", "tracks"], out: "s.json" },
       pretty: true
     });
-    expect(parseCli(["export", "bom"]).command).toEqual({ name: "export", kind: "bom", format: "csv", overwrite: false });
+    expect(parseCli(["export", "bom"]).command).toEqual({ name: "export", kind: "bom", overwrite: false });
+    expect(parseCli(["export", "step", "--out", "x/"]).command).toEqual({ name: "export", kind: "step", out: "x/", overwrite: false });
+    expect(parseCli(["export", "--list"])).toMatchObject({ command: { name: "export-list" }, start: false });
+    expect(parseCli(["package", "--preset", "assembly", "--zip", "--drc-gate"]).command).toEqual({ name: "package", preset: "assembly", zip: true, drcGate: true });
+    expect(parseCli(["package", "--kinds", "gerber, pnp"]).command).toMatchObject({ kinds: ["gerber", "pnp"] });
+    expect(parseCli(["check", "--json"]).command).toEqual({ name: "check", json: true, strict: false });
     expect(parseCli(["render", "--designator", "U1", "--margin", "1", "-o", "v.png"]).command).toEqual({ name: "render", designator: "U1", margin: 1, out: "v.png" });
   });
 });
@@ -160,5 +173,64 @@ describe("CLI against an in-process hub", () => {
     const call = await run(["call", "pcb_X.getAll", "--no-start"]);
     expect(call.code).toBe(1);
     expect(JSON.parse(call.stderr)).toMatchObject({ error: { code: "hub_not_running" } });
+  });
+});
+
+describe("CLI export / package / check (fake editor)", () => {
+  async function tempDir() {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "easyeda-cli-ops-"));
+    cleanups.push(() => rm(dir, { recursive: true, force: true }));
+    return dir;
+  }
+  const noStdin = { readStdin: async () => "" };
+
+  it("exports a catalog kind into a directory and refuses to overwrite", async () => {
+    const dir = await tempDir();
+    const editor = fakeEditor();
+    const command = parseCli(["export", "step", "--out", `${dir}/`]).command as Parameters<typeof runEditorCommand>[0];
+    const first = await runEditorCommand(command, editor.bridge as never, undefined, noStdin);
+    expect(first.output).toMatchObject({ kind: "step", path: path.join(dir, "My_Board_v2-step.step"), restoredDocument: true });
+    await expect(runEditorCommand(command, editor.bridge as never, undefined, noStdin)).rejects.toMatchObject({ code: "EEXIST" });
+  });
+
+  it("package exits 1 with --drc-gate when DRC has errors, 0 without the gate", async () => {
+    const dir = await tempDir();
+    const gated = parseCli(["package", "--kinds", "gerber,pnp", "--out", path.join(dir, "a"), "--drc-gate"]).command as Parameters<typeof runEditorCommand>[0];
+    const failing = await runEditorCommand(gated, fakeEditor({ drcErrors: 3 }).bridge as never, undefined, noStdin);
+    expect(failing.exitCode).toBe(1);
+    expect(JSON.parse(await readFile(path.join(dir, "a", "manifest.json"), "utf8")).drc.errorCount).toBe(3);
+
+    const ungated = parseCli(["package", "--kinds", "gerber,pnp", "--out", path.join(dir, "b")]).command as Parameters<typeof runEditorCommand>[0];
+    expect((await runEditorCommand(ungated, fakeEditor({ drcErrors: 3 }).bridge as never, undefined, noStdin)).exitCode).toBe(0);
+    const clean = parseCli(["package", "--kinds", "gerber", "--out", path.join(dir, "c"), "--drc-gate"]).command as Parameters<typeof runEditorCommand>[0];
+    expect((await runEditorCommand(clean, fakeEditor().bridge as never, undefined, noStdin)).exitCode).toBe(0);
+    const withFailure = parseCli(["package", "--kinds", "gerber,dxf", "--out", path.join(dir, "d")]).command as Parameters<typeof runEditorCommand>[0];
+    const failed = await runEditorCommand(withFailure, fakeEditor({ failPaths: ["pcb_ManufactureData.getDxfFile"] }).bridge as never, undefined, noStdin);
+    expect(failed.exitCode).toBe(1);
+    expect(failed.output).toMatchObject({ failures: [{ kind: "dxf" }] });
+  });
+
+  it("check prints text by default and JSON with --json; exit 0 clean / 1 findings", async () => {
+    const empty = { components: {} };
+    const clean = await runEditorCommand(parseCli(["check"]).command as never, fakeEditor({ enet: empty }).bridge as never, undefined, noStdin);
+    expect(clean.exitCode).toBe(0);
+    expect(clean.text).toMatch(/^OK: 0 finding/);
+    const dirty = await runEditorCommand(parseCli(["check", "--json"]).command as never, fakeEditor({ enet: empty, drcErrors: 1 }).bridge as never, undefined, noStdin);
+    expect(dirty.exitCode).toBe(1);
+    expect(dirty.text).toBeUndefined();
+    expect(dirty.output).toMatchObject({ ok: false, drc: { errorCount: 1 } });
+  });
+
+  it("export --list works without a hub and check errors exit 2", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "easyeda-cli-nohub-"));
+    cleanups.push(() => rm(dir, { recursive: true, force: true }));
+    vi.stubEnv("EASYEDA_MCP_CONFIG_DIR", dir);
+    let out = "";
+    let err = "";
+    const io = { stdout: (text: string) => { out += text; }, stderr: (text: string) => { err += text; }, readStdin: async () => "" };
+    expect(await runCli(["export", "--list"], io)).toBe(0);
+    expect(JSON.parse(out).unsupported.map((item: { kind: string }) => item.kind)).toContain("ipc2581");
+    expect(await runCli(["check", "--no-start"], io)).toBe(2);
+    expect(JSON.parse(err).error.code).toBe("hub_not_running");
   });
 });

@@ -190,3 +190,36 @@ describe("MCP gate for easyeda_api_call / easyeda_pcb_move_component", () => {
     expect(byName.easyeda_render_view?.description).toContain("changes the editor view");
   });
 });
+
+describe("catalog-driven MCP tools", () => {
+  it("easyeda_export writes the file, switches back, and inlines text", async () => {
+    const { fakeEditor } = await import("./fakeEditor.testutil.js");
+    const { mkdtemp, rm, readFile } = await import("node:fs/promises");
+    const os = await import("node:os");
+    const nodePath = await import("node:path");
+    const dir = await mkdtemp(nodePath.join(os.tmpdir(), "easyeda-mcp-export-"));
+    try {
+      const editor = fakeEditor();
+      const client = await makeClient(editor.bridge as never);
+      const result = await client.callTool({ name: "easyeda_export", arguments: { kind: "pnp", outputPath: `${dir}/` } });
+      expect(result.isError).toBeFalsy();
+      expect(result.structuredContent).toMatchObject({ result: { kind: "pnp", restoredDocument: true, path: nodePath.join(dir, "My_Board_v2-pnp.csv") } });
+      expect(await readFile(nodePath.join(dir, "My_Board_v2-pnp.csv"), "utf8")).toContain("getPickAndPlaceFile");
+      const broken = await client.callTool({ name: "easyeda_export", arguments: { kind: "ipc2581" } });
+      expect(broken.structuredContent).toMatchObject({ error: "export_unsupported" });
+
+      const pkg = await client.callTool({ name: "easyeda_package", arguments: { kinds: ["gerber", "sch-pdf"], outDir: nodePath.join(dir, "pkg") } });
+      expect(pkg.structuredContent).toMatchObject({ manifest: { files: [{ kind: "gerber" }, { kind: "sch-pdf" }] } });
+
+      const { tools } = await client.listTools();
+      const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
+      for (const name of ["easyeda_export", "easyeda_package", "easyeda_design_check"]) {
+        expect(byName[name]?.annotations?.readOnlyHint, name).toBe(false);
+        expect(byName[name]?.annotations?.destructiveHint, name).toBe(false);
+      }
+      expect(byName.easyeda_export?.description).toContain("ipc2581");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});

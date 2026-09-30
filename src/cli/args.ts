@@ -1,6 +1,7 @@
 import { parseArgs } from "node:util";
 import { parseRegion, type MoveRequest, type Region } from "../mcp/liveOps.js";
-import type { ExportKind } from "../mcp/exportFiles.js";
+import { getCatalogEntry } from "../mcp/exportCatalog.js";
+import { PACKAGE_PRESETS } from "../mcp/exportOps.js";
 
 export const PCB_SNAPSHOT_SECTIONS = ["components", "pads", "tracks", "vias", "arcs", "pours", "fills", "regions", "strings", "nets", "layers", "outline"] as const;
 
@@ -14,7 +15,10 @@ export type CliCommand =
   | { name: "pcb-move"; request: MoveRequest }
   | { name: "pcb-drc"; strict?: boolean; verbose?: boolean }
   | { name: "sch-snapshot"; out?: string }
-  | { name: "export"; kind: ExportKind; out?: string; format?: "csv" | "json" | "xlsx"; scope?: "pcb" | "schematic" | "auto"; overwrite: boolean }
+  | { name: "export"; kind: string; out?: string; format?: string; scope?: "pcb" | "schematic" | "auto"; overwrite: boolean }
+  | { name: "export-list" }
+  | { name: "package"; out?: string; kinds?: string[]; preset?: string; zip: boolean; drcGate: boolean }
+  | { name: "check"; json: boolean; strict: boolean }
   | { name: "render"; designator?: string; region?: Region; margin?: number; out: string }
   | { name: "daemon" }
   | { name: "stop" };
@@ -53,7 +57,13 @@ const OPTIONS = {
   designator: { type: "string" },
   region: { type: "string" },
   margin: { type: "string" },
-  "continue-on-error": { type: "boolean" }
+  "continue-on-error": { type: "boolean" },
+  list: { type: "boolean" },
+  kinds: { type: "string" },
+  preset: { type: "string" },
+  zip: { type: "boolean" },
+  "drc-gate": { type: "boolean" },
+  json: { type: "boolean" }
 } as const;
 
 type OptionName = keyof typeof OPTIONS;
@@ -71,6 +81,9 @@ const COMMAND_OPTIONS: Record<CliCommand["name"], OptionName[]> = {
   "pcb-drc": ["strict", "verbose"],
   "sch-snapshot": ["out"],
   export: ["out", "format", "scope", "overwrite"],
+  "export-list": ["list"],
+  package: ["out", "kinds", "preset", "zip", "drc-gate"],
+  check: ["json", "strict"],
   render: ["designator", "region", "margin", "out"],
   daemon: [],
   stop: []
@@ -179,7 +192,7 @@ export function parseCli(argv: string[]): CliInvocation {
 
 /** Commands that talk to EasyEDA (and so start a daemon by default). */
 export function needsEditor(command: CliCommand): boolean {
-  return !["help", "status", "daemon", "stop"].includes(command.name);
+  return !["help", "status", "daemon", "stop", "export-list"].includes(command.name);
 }
 
 function buildCommand(positionals: string[], values: Values): CliCommand {
@@ -209,28 +222,64 @@ function buildCommand(positionals: string[], values: Values): CliCommand {
       noExtra(positionals, 2);
       return { name: "sch-snapshot", ...(values.out ? { out: values.out } : {}) };
     case "export": {
+      if (values.list) {
+        noExtra(positionals, 1);
+        return { name: "export-list" };
+      }
       noExtra(positionals, 2);
-      const kind = need(positionals, 1, "export kind (bom|netlist|gerber|pdf)");
-      if (!["bom", "netlist", "gerber", "pdf"].includes(kind)) {
-        throw new CliUsageError(`Unknown export kind "${kind}". Use bom, netlist, gerber, or pdf.`);
-      }
-      const format = oneOf(values, "format", ["csv", "json", "xlsx"] as const);
-      if (format && kind !== "bom") {
-        throw new CliUsageError("--format only applies to bom.");
-      }
+      const kind = need(positionals, 1, "export kind (see easyeda export --list)");
       const scope = oneOf(values, "scope", ["pcb", "schematic", "auto"] as const);
-      if (scope && kind === "gerber") {
-        throw new CliUsageError("--scope does not apply to gerber.");
+      let entry;
+      try {
+        entry = getCatalogEntry(kind, { scope });
+      } catch (error) {
+        throw new CliUsageError(error instanceof Error ? error.message : String(error));
+      }
+      if (scope && !["bom", "netlist", "pcb-pdf", "sch-pdf"].includes(entry.kind)) {
+        throw new CliUsageError("--scope only applies to bom, netlist, and pdf.");
+      }
+      const format = values.format;
+      if (format !== undefined && !entry.formats?.includes(format)) {
+        throw new CliUsageError(entry.formats ? `--format for ${entry.kind} must be one of ${entry.formats.join(", ")}.` : `--format does not apply to ${entry.kind}.`);
       }
       return {
         name: "export",
-        kind: kind as ExportKind,
+        kind,
         overwrite: values.overwrite ?? false,
         ...(values.out ? { out: values.out } : {}),
-        ...(format ? { format } : kind === "bom" ? { format: "csv" as const } : {}),
+        ...(format ? { format } : {}),
         ...(scope ? { scope } : {})
       };
     }
+    case "package": {
+      noExtra(positionals, 1);
+      if (values.kinds !== undefined && values.preset !== undefined) {
+        throw new CliUsageError("Use either --kinds or --preset.");
+      }
+      const kinds = values.kinds?.split(",").map((part) => part.trim()).filter(Boolean);
+      if (values.kinds !== undefined && !kinds?.length) {
+        throw new CliUsageError("--kinds needs a comma list, e.g. gerber,bom,pnp.");
+      }
+      for (const kind of kinds ?? []) {
+        try {
+          getCatalogEntry(kind);
+        } catch (error) {
+          throw new CliUsageError(error instanceof Error ? error.message : String(error));
+        }
+      }
+      const preset = oneOf(values, "preset", Object.keys(PACKAGE_PRESETS));
+      return {
+        name: "package",
+        zip: values.zip ?? false,
+        drcGate: values["drc-gate"] ?? false,
+        ...(values.out ? { out: values.out } : {}),
+        ...(kinds ? { kinds } : {}),
+        ...(preset ? { preset } : {})
+      };
+    }
+    case "check":
+      noExtra(positionals, 1);
+      return { name: "check", json: values.json ?? false, strict: values.strict ?? false };
     case "render": {
       noExtra(positionals, 1);
       if (!values.out) {
@@ -314,7 +363,10 @@ Usage:
   easyeda pcb move <designator> [--x N] [--y N] [--dx N] [--dy N] [--rotation N] [--layer top|bottom|N]
   easyeda pcb drc [--strict] [--verbose]
   easyeda sch snapshot [--out file]
-  easyeda export <bom|netlist|gerber|pdf> [--out path] [--format csv|json|xlsx] [--scope pcb|schematic|auto] [--overwrite]
+  easyeda export <kind> [--out path] [--format csv|json|xlsx] [--scope pcb|schematic] [--overwrite]
+  easyeda export --list                   All export kinds (gerber, step, pnp, bom, ibom, odb, ...)
+  easyeda package [--out dir] [--preset fab|assembly|docs|all | --kinds a,b] [--zip] [--drc-gate]
+  easyeda check [--json] [--strict]       DRC + schematic-vs-PCB netlist + unconnected pins (exit 0/1/2)
   easyeda render --out view.png [--designator U1] [--region l,r,t,b] [--margin 0.5]
   easyeda daemon                          Run the bridge + hub in the foreground
   easyeda stop                            Stop a running daemon

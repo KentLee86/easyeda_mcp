@@ -3,7 +3,9 @@ import path from "node:path";
 import { errorToWire } from "../bridge/errors.js";
 import { configDir } from "../bridge/config.js";
 import type { BridgeClient } from "../bridge/types.js";
-import { isExportedFile, writeExport } from "../mcp/exportFiles.js";
+import { resolveExportTarget } from "../mcp/exportFiles.js";
+import { describeCatalog } from "../mcp/exportCatalog.js";
+import { collectPackage, exportKind, formatDesignCheck, runDesignCheck, writePackage } from "../mcp/exportOps.js";
 import { buildRenderParams, isRenderedImage, movePcbComponent } from "../mcp/liveOps.js";
 import { CliUsageError, parseCli, USAGE, type CliCommand, type CliInvocation } from "./args.js";
 import { connectHub, findHub } from "./hub.js";
@@ -24,10 +26,8 @@ const defaultIo: CliIo = {
   }
 };
 
-const EXPORT_METHODS = { bom: "exportBom", netlist: "exportNetlist", gerber: "exportGerber", pdf: "exportPdf" } as const;
-
-/** Result of a command: what to print and the exit code. */
-type Outcome = { output: unknown; exitCode?: number };
+/** Result of a command: what to print (JSON, or raw text) and the exit code. */
+type Outcome = { output: unknown; text?: string; exitCode?: number };
 
 /**
  * Run the CLI. Resolves to the exit code, or undefined for `daemon`, which
@@ -47,19 +47,25 @@ export async function runCli(argv: string[], io: CliIo = defaultIo): Promise<num
       await runDaemon();
       return undefined;
     }
+    if (command.name === "export-list") {
+      const catalog = describeCatalog();
+      io.stdout(`${JSON.stringify(catalog, null, invocation.pretty ? 2 : undefined)}\n`);
+      return 0;
+    }
     const outcome = await execute(command, invocation, io);
-    io.stdout(`${JSON.stringify(outcome.output ?? null, null, invocation.pretty ? 2 : undefined)}\n`);
+    io.stdout(outcome.text ?? `${JSON.stringify(outcome.output ?? null, null, invocation.pretty ? 2 : undefined)}\n`);
     return outcome.exitCode ?? 0;
   } catch (error) {
     const wire = error instanceof CliUsageError
       ? { code: "usage", message: `${error.message}\nRun easyeda --help for usage.` }
       : errorToWire(error).error;
     io.stderr(`${JSON.stringify({ ok: false, error: wire }, null, invocation?.pretty ? 2 : undefined)}\n`);
-    return error instanceof CliUsageError ? 2 : 1;
+    // `check` reserves 1 for findings, so errors are 2 there.
+    return error instanceof CliUsageError || invocation?.command.name === "check" ? 2 : 1;
   }
 }
 
-async function execute(command: Exclude<CliCommand, { name: "help" | "daemon" }>, invocation: CliInvocation, io: CliIo): Promise<Outcome> {
+async function execute(command: Exclude<CliCommand, { name: "help" | "daemon" | "export-list" }>, invocation: CliInvocation, io: CliIo): Promise<Outcome> {
   if (command.name === "status") {
     const connection = invocation.start
       ? await connectHub({ start: true, requireExtension: false })
@@ -88,7 +94,7 @@ async function execute(command: Exclude<CliCommand, { name: "help" | "daemon" }>
 
 /** Commands that talk to EasyEDA through a bridge (exported for tests). */
 export async function runEditorCommand(
-  command: Exclude<CliCommand, { name: "help" | "daemon" | "status" | "stop" }>,
+  command: Exclude<CliCommand, { name: "help" | "daemon" | "status" | "stop" | "export-list" }>,
   bridge: BridgeClient,
   timeoutMs: number | undefined,
   io: Pick<CliIo, "readStdin">
@@ -122,19 +128,33 @@ export async function runEditorCommand(
     case "pcb-drc":
       return { output: await bridge.call("pcbDrc", { ...(command.strict ? { strict: true } : {}), ...(command.verbose ? { verbose: true } : {}) }, timeoutMs ?? 120_000) };
     case "export": {
-      const params = { ...(command.format ? { format: command.format } : {}), ...(command.scope ? { scope: command.scope } : {}) };
-      const result = await bridge.call(EXPORT_METHODS[command.kind], params, timeoutMs ?? 120_000);
-      if (!isExportedFile(result)) {
-        return { output: { ok: false, message: "EasyEDA Pro did not return file contents.", result }, exitCode: 1 };
-      }
-      const { text: _text, truncated: _truncated, ...written } = await writeExport(result, {
-        kind: command.kind,
-        format: command.format,
-        outputPath: command.out,
-        overwrite: command.overwrite,
-        maxInlineChars: 0
-      });
-      return { output: written };
+      // Switches to the kind's document (useDocument) and back.
+      const file = await exportKind(bridge, command.kind, { format: command.format, scope: command.scope, ...(timeoutMs ? { timeoutMs } : {}) });
+      const target = await resolveExportTarget(command.out ?? "./", file.fileName);
+      await mkdir(path.dirname(target), { recursive: true });
+      await writeFile(target, file.data, { flag: command.overwrite ? "w" : "wx" });
+      return { output: { kind: file.kind, path: target, bytes: file.data.length, ms: file.ms, document: file.document, restoredDocument: file.restored, ...(file.note ? { note: file.note } : {}) } };
+    }
+    case "package": {
+      const collected = await collectPackage(bridge, { kinds: command.kinds, preset: command.preset });
+      const written = await writePackage(collected, { outDir: command.out, zip: command.zip });
+      const { manifest } = written;
+      const drcFailed = !manifest.drc || !manifest.drc.ok || manifest.drc.errorCount > 0;
+      return {
+        output: {
+          dir: written.dir,
+          ...(written.zipPath ? { zip: written.zipPath } : {}),
+          files: manifest.files.map((file) => `${file.path} (${file.bytes} B, ${file.ms} ms)`),
+          failures: manifest.failures,
+          drc: manifest.drc ? { ok: manifest.drc.ok, errorCount: manifest.drc.errorCount, ...(manifest.drc.error ? { error: manifest.drc.error } : {}) } : undefined,
+          restoredDocument: manifest.documents.restored
+        },
+        exitCode: manifest.failures.length > 0 || (command.drcGate && drcFailed) ? 1 : 0
+      };
+    }
+    case "check": {
+      const report = await runDesignCheck(bridge, { strict: command.strict });
+      return { output: report, ...(command.json ? {} : { text: formatDesignCheck(report) }), exitCode: report.ok ? 0 : 1 };
     }
     case "render": {
       const params = await buildRenderParams(bridge, command, timeoutMs ?? 30_000);
