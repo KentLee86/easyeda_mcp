@@ -100,16 +100,19 @@ Measured on EasyEDA Pro 3.2.149 with a 79-part, 2-layer board:
 | Step | Time |
 | --- | --- |
 | Container start / editor ready (already activated) | 0.2 s / 2.8 s |
-| Open a local project (`open-project.sh`, includes a 3 s settle wait) | 7.5 s |
+| Open a local project (`open-project.sh`; Recent Design / file dialog) | 2.2 s / 3.5 s |
 | Hot-load the extension and connect | 0.03 s + 0.3 s |
 | CLI command incl. `docker run` of the sidecar | ~0.26 s (the call itself is mostly < 50 ms) |
 | `pcbSnapshot` (all parts, 400 KB JSON) | 34 ms |
 | Move a component (modify + read back) | 30–60 ms |
 | DRC | 0.37 s |
 | Schematic snapshot of 3 pages (opens each page) | 0.5–1.5 s |
-| Zoomed PNG render / unzoomed | 0.38 s / 0.08 s |
+| Zoomed PNG render (no settle wait needed) | 0.09 s |
 | Exports (BOM, netlist, Gerber, PDF) | 0.3–0.5 s |
-| New MCP process reaching the extension: proxy via hub / after `bye` / before this work | 4 ms / 0.9 s / ~19 s |
+| New MCP process reaching the extension via the hub (proxy) | 4 ms |
+| Owner stops → successor owns the port → extension connected | 20 ms → ~0.1 s (was ~19 s) |
+| Owner crashes (no `bye`) → extension notices | ≤ 10 s |
+| `easyeda package --preset all --zip` (20 files) / `easyeda check` | 8.4 s / 2.9 s |
 
 Activation is stored in the `easyeda-mcp-live-home` volume, so it happens once.
 
