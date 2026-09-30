@@ -495,6 +495,61 @@ describe("schematic analysis", () => {
       expect(snapshot.wires[0]?.endpoints).toEqual([{ x: 0, y: 0 }, { x: 40, y: 20 }]);
     });
   });
+
+  describe("multi-page schematics", () => {
+    const load = () => buildSchematicSnapshot({ ...loadFixture("two-page.json"), includeRaw: false });
+    const pinKey = (item: { componentDesignator?: string; pinNumber?: string }) => `${item.componentDesignator}#${item.pinNumber}`;
+
+    it("tags every primitive with its page and keeps raw primitiveIds", () => {
+      const snapshot = load();
+
+      expect(snapshot.counts).toMatchObject({ pages: 2, components: 6, pins: 10, wires: 4 });
+      expect(snapshot.components.filter((item) => item.primitiveId === "e2").map((item) => [item.designator, item.page?.name]))
+        .toEqual([["R1", "Power"], ["C1", "IO"]]);
+      expect([...snapshot.pins, ...snapshot.wires, ...snapshot.labels].every((item) => item.page?.uuid)).toBe(true);
+      expect(snapshot.warnings.some((warning) => warning.includes("on page IO"))).toBe(true);
+    });
+
+    it("does not mix pins of components that share a primitiveId on different pages", () => {
+      const snapshot = load();
+
+      expect(getComponentPins(snapshot, "R1").pins.map(pinKey)).toEqual(["R1#1", "R1#2"]);
+      expect(getComponentPins(snapshot, "C1").pins.map(pinKey)).toEqual(["C1#1", "C1#2"]);
+    });
+
+    it("never connects geometry across pages", () => {
+      const snapshot = load();
+
+      // U1#5 sits at (0,0) on page IO, where page Power has wire w1.
+      expect(findUnconnectedPins(snapshot).pins.map(pinKey)).toEqual(["U1#5"]);
+      const u1p1 = snapshot.pins.find((item) => item.primitiveId === "e1p1");
+      const c1p2 = snapshot.pins.find((item) => item.primitiveId === "e2p2" && item.page?.uuid === "page-io");
+      expect(u1p1?.nodeId).toContain("page-power");
+      expect(c1p2?.nodeId).toContain("page-io");
+      const result = verifyConnections(snapshot, [
+        { type: "same_node", left: { component: "U1", pin: "1" }, right: { component: "C1", pin: "2" } },
+        { type: "same_node", left: { component: "U1", pin: "1" }, right: { component: "R1", pin: "1" } }
+      ]);
+      expect(result.checks.map((check) => check.status)).toEqual(["fail", "pass"]);
+    });
+
+    it("merges a named net (GND netflag) across pages and resolves multi-part components by designator", () => {
+      const snapshot = load();
+
+      const gnd = traceNet(snapshot, "GND").net;
+      expect(snapshot.nets.map((net) => net.name)).toEqual(["GND"]);
+      expect(gnd?.nodeIds).toEqual(["net:GND"]);
+      expect(gnd?.connectedPins.filter((item) => item.componentDesignator).map(pinKey).sort()).toEqual(["C1#1", "R1#2", "U1#2", "U1#6"]);
+
+      expect(getComponentPins(snapshot, "U1").pins.map(pinKey)).toEqual(["U1#1", "U1#2", "U1#5", "U1#6"]);
+      expect(traceComponent(snapshot, "U1").findings.map((finding) => finding.evidence.pinNumber)).toEqual(["5"]);
+      const result = verifyConnections(snapshot, [
+        { type: "pin_on_net", component: "U1", pin: "6", net: "GND" },
+        { type: "same_node", left: { component: "U1", pin: "2" }, right: { component: "U1", pin: "6" } }
+      ]);
+      expect(result.checks.map((check) => check.status)).toEqual(["pass", "pass"]);
+    });
+  });
 });
 
 function component(designator: string, primitiveId: string, value: string): Record<string, unknown> {

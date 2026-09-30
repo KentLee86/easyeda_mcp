@@ -1,0 +1,57 @@
+{
+  "_comment": "Two-page schematic modeled on EasyEDA Pro 3.2 per-page data: primitiveIds e1/e2/e3/w1/w2 repeat on both pages, coordinates overlap, GND netflag on both pages, U1 is a multi-part component (A on Power, B on IO).",
+  "pages": [
+    {
+      "uuid": "page-power",
+      "name": "Power",
+      "components": [
+        { "primitiveType": "Component", "componentType": "part", "primitiveId": "e1", "designator": "U1", "subPartName": "U1.A", "x": 0, "y": 20 },
+        { "primitiveType": "Component", "componentType": "part", "primitiveId": "e2", "designator": "R1", "value": "10k", "x": 40, "y": 20 },
+        { "primitiveType": "Component", "componentType": "netflag", "primitiveId": "e3", "value": "GND", "x": 20, "y": -60 }
+      ],
+      "pinsByComponent": {
+        "e1": [
+          { "primitiveId": "e1p1", "pinNumber": "1", "pinName": "VIN", "x": 0, "y": 0 },
+          { "primitiveId": "e1p2", "pinNumber": "2", "pinName": "GND", "x": 0, "y": -40 }
+        ],
+        "e2": [
+          { "primitiveId": "e2p1", "pinNumber": "1", "pinName": "1", "x": 40, "y": 0 },
+          { "primitiveId": "e2p2", "pinNumber": "2", "pinName": "2", "x": 40, "y": -40 }
+        ],
+        "e3": [
+          { "primitiveId": "e3p1", "pinNumber": "1", "pinName": "GND", "x": 20, "y": -40 }
+        ]
+      },
+      "wires": [
+        { "primitiveId": "w1", "line": [0, 0, 40, 0] },
+        { "primitiveId": "w2", "line": [0, -40, 20, -40, 20, -40, 40, -40] }
+      ]
+    },
+    {
+      "uuid": "page-io",
+      "name": "IO",
+      "components": [
+        { "primitiveType": "Component", "componentType": "part", "primitiveId": "e1", "designator": "U1", "subPartName": "U1.B", "x": 0, "y": 20 },
+        { "primitiveType": "Component", "componentType": "part", "primitiveId": "e2", "designator": "C1", "value": "100nF", "x": 60, "y": 20 },
+        { "primitiveType": "Component", "componentType": "netflag", "primitiveId": "e3", "value": "GND", "x": 20, "y": -60 }
+      ],
+      "pinsByComponent": {
+        "e1": [
+          { "primitiveId": "e1p5", "pinNumber": "5", "pinName": "IO", "x": 0, "y": 0 },
+          { "primitiveId": "e1p6", "pinNumber": "6", "pinName": "GND", "x": 0, "y": -40 }
+        ],
+        "e2": [
+          { "primitiveId": "e2p1", "pinNumber": "1", "pinName": "1", "x": 40, "y": -40 },
+          { "primitiveId": "e2p2", "pinNumber": "2", "pinName": "2", "x": 80, "y": 0 }
+        ],
+        "e3": [
+          { "primitiveId": "e3p1", "pinNumber": "1", "pinName": "GND", "x": 20, "y": -40 }
+        ]
+      },
+      "wires": [
+        { "primitiveId": "w1", "line": [80, 0, 120, 0] },
+        { "primitiveId": "w2", "line": [0, -40, 20, -40, 20, -40, 40, -40] }
+      ]
+    }
+  ]
+}

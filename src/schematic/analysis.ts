@@ -17,8 +17,14 @@ export type ConnectivityEvidence = {
   reason?: string;
 };
 
+export type SchematicPageRef = {
+  uuid: string;
+  name?: string;
+};
+
 export type SchematicComponent = {
   primitiveId?: string;
+  page?: SchematicPageRef;
   designator?: string;
   value?: string;
   name?: string;
@@ -32,6 +38,7 @@ export type SchematicComponent = {
 
 export type SchematicPin = {
   primitiveId?: string;
+  page?: SchematicPageRef;
   componentPrimitiveId?: string;
   componentDesignator?: string;
   pinNumber?: string;
@@ -47,6 +54,7 @@ export type SchematicPin = {
 
 export type SchematicWire = {
   primitiveId?: string;
+  page?: SchematicPageRef;
   net?: string;
   nodeId?: string;
   geometry?: unknown;
@@ -56,6 +64,7 @@ export type SchematicWire = {
 
 export type SchematicLabel = {
   primitiveId?: string;
+  page?: SchematicPageRef;
   net?: string;
   type?: string;
   nodeId?: string;
@@ -91,10 +100,20 @@ export type SchematicSnapshot = {
     wires: number;
     labels: number;
     nets: number;
+    pages?: number;
   };
   confidence: Confidence;
   warnings: string[];
   betaApi: true;
+};
+
+export type RawSchematicPage = {
+  uuid: string;
+  name?: string;
+  components?: unknown[];
+  pinsByComponent?: Record<string, unknown[]>;
+  wires?: unknown[];
+  texts?: unknown[];
 };
 
 export type RawSchematicData = {
@@ -102,6 +121,8 @@ export type RawSchematicData = {
   pinsByComponent?: Record<string, unknown[]>;
   wires?: unknown[];
   texts?: unknown[];
+  /** Per-page data. When present, the top-level arrays are ignored. */
+  pages?: RawSchematicPage[];
   includeRaw?: boolean;
 };
 
@@ -216,47 +237,22 @@ export type VerifyConnectionsResult = {
 
 export function buildSchematicSnapshot(raw: RawSchematicData): SchematicSnapshot {
   const includeRaw = raw.includeRaw ?? true;
-  const rawComponents = raw.components ?? [];
-  const components = rawComponents.map((component) => normalizeComponent(component, includeRaw));
-  const componentById = new Map(components.map((component) => [component.primitiveId, component]));
-  const pins: SchematicPin[] = [];
-
-  for (const [componentPrimitiveId, rawPins] of Object.entries(raw.pinsByComponent ?? {})) {
-    const component = componentById.get(componentPrimitiveId);
-    for (const rawPin of rawPins) {
-      pins.push(normalizePin(rawPin, componentPrimitiveId, component?.designator, includeRaw));
-    }
-  }
-
-  const wires = (raw.wires ?? []).map((wire) => normalizeWire(wire, includeRaw));
-  const componentLabels = rawComponents.flatMap((component) => normalizeComponentLabel(component, includeRaw)).map((label) => {
-    const connectionPoints = pins
-      .filter((pin) => label.primitiveId && pin.componentPrimitiveId === label.primitiveId)
-      .map((pin) => pin.position)
-      .filter((position) => requiredPosition(position));
-    return connectionPoints.length > 0 ? { ...label, connectionPoints } : label;
-  });
-  const rawLabels = [
-    ...componentLabels,
-    ...(raw.texts ?? []).flatMap((text) => normalizeTextLabel(text, includeRaw))
-  ];
-  const resolved = resolveConnectivity(pins, wires, rawLabels);
-  const labels = resolved.labels;
-  const nets = buildNets(resolved.pins, resolved.wires, labels);
-  const warnings: string[] = [];
-
-  if (pins.length === 0 && components.some((component) => component.componentType === "part")) {
-    warnings.push("No component pins were returned by EasyEDA Pro; connectivity confidence is low.");
-  }
-  if (wires.length === 0) {
-    warnings.push("No schematic wires were returned by EasyEDA Pro; wire-based checks may be incomplete.");
-  }
-  warnings.push(...resolved.warnings);
+  // Geometry is resolved strictly per page (coordinates and primitiveIds are
+  // only unique within a page); named nets then merge globally by name in buildNets.
+  const pageResults = raw.pages
+    ? raw.pages.map((page) => buildPageData(page, { uuid: page.uuid, ...(page.name ? { name: page.name } : {}) }, includeRaw))
+    : [buildPageData(raw, undefined, includeRaw)];
+  const components = pageResults.flatMap((item) => item.components);
+  const pins = pageResults.flatMap((item) => item.pins);
+  const wires = pageResults.flatMap((item) => item.wires);
+  const labels = pageResults.flatMap((item) => item.labels);
+  const nets = buildNets(pins, wires, labels);
+  const warnings = pageResults.flatMap((item) => item.warnings);
 
   return {
     components,
-    pins: resolved.pins,
-    wires: resolved.wires,
+    pins,
+    wires,
     labels,
     nets,
     counts: {
@@ -264,11 +260,68 @@ export function buildSchematicSnapshot(raw: RawSchematicData): SchematicSnapshot
       pins: pins.length,
       wires: wires.length,
       labels: labels.length,
-      nets: nets.length
+      nets: nets.length,
+      ...(raw.pages ? { pages: raw.pages.length } : {})
     },
-    confidence: snapshotConfidence(resolved.pins, resolved.wires, nets),
+    confidence: snapshotConfidence(pins, wires, nets),
     warnings,
     betaApi: true
+  };
+}
+
+type RawPageInput = Pick<RawSchematicPage, "components" | "pinsByComponent" | "wires" | "texts">;
+
+function buildPageData(raw: RawPageInput, page: SchematicPageRef | undefined, includeRaw: boolean): {
+  components: SchematicComponent[];
+  pins: SchematicPin[];
+  wires: SchematicWire[];
+  labels: SchematicLabel[];
+  warnings: string[];
+} {
+  const withPage = <T extends object>(item: T): T => (page ? { ...item, page } : item);
+  const rawComponents = raw.components ?? [];
+  const components = rawComponents.map((component) => withPage(normalizeComponent(component, includeRaw)));
+  // Lookup is local to this page, so identical primitiveIds on other pages never collide.
+  const componentById = new Map(components.map((component) => [component.primitiveId, component]));
+  const pins: SchematicPin[] = [];
+
+  for (const [componentPrimitiveId, rawPins] of Object.entries(raw.pinsByComponent ?? {})) {
+    const component = componentById.get(componentPrimitiveId);
+    for (const rawPin of rawPins) {
+      pins.push(withPage(normalizePin(rawPin, componentPrimitiveId, component?.designator, includeRaw)));
+    }
+  }
+
+  const wires = (raw.wires ?? []).map((wire) => withPage(normalizeWire(wire, includeRaw)));
+  const componentLabels = rawComponents.flatMap((component) => normalizeComponentLabel(component, includeRaw)).map((label) => {
+    const connectionPoints = pins
+      .filter((pin) => label.primitiveId && pin.componentPrimitiveId === label.primitiveId)
+      .map((pin) => pin.position)
+      .filter((position) => requiredPosition(position));
+    return withPage(connectionPoints.length > 0 ? { ...label, connectionPoints } : label);
+  });
+  const rawLabels = [
+    ...componentLabels,
+    ...(raw.texts ?? []).flatMap((text) => normalizeTextLabel(text, includeRaw)).map(withPage)
+  ];
+  const resolved = resolveConnectivity(pins, wires, rawLabels, page);
+  const where = page ? ` on page ${page.name ?? page.uuid}` : "";
+  const warnings: string[] = [];
+
+  if (pins.length === 0 && components.some((component) => component.componentType === "part")) {
+    warnings.push(`No component pins were returned by EasyEDA Pro${where}; connectivity confidence is low.`);
+  }
+  if (wires.length === 0) {
+    warnings.push(`No schematic wires were returned by EasyEDA Pro${where}; wire-based checks may be incomplete.`);
+  }
+  warnings.push(...resolved.warnings.map((warning) => `${warning.replace(/\.$/, "")}${where}.`));
+
+  return {
+    components,
+    pins: resolved.pins,
+    wires: resolved.wires,
+    labels: resolved.labels,
+    warnings
   };
 }
 
@@ -289,7 +342,7 @@ export function getComponentPins(snapshot: SchematicSnapshot, query: string): {
   if (!component) {
     return { pins: [], confidence: "low" };
   }
-  const pins = snapshot.pins.filter((pin) => pin.componentPrimitiveId === component.primitiveId || sameText(pin.componentDesignator, component.designator));
+  const pins = snapshot.pins.filter((pin) => pinBelongsToComponent(pin, component));
   return {
     component,
     pins,
@@ -397,11 +450,11 @@ export function validateSchematicArea(
   const components = options.components?.length ? options.components.map((query) => findComponent(snapshot, query)).filter(isPresent) : snapshot.components;
   const nets = options.nets?.length ? options.nets.map((query) => findNet(snapshot, query)).filter(isPresent) : snapshot.nets;
   const findings: SchematicFinding[] = [];
-  const componentIds = new Set(components.map((component) => component.primitiveId));
+  const componentKeys = new Set(components.map((component) => scopedKey(component.page, component.primitiveId)));
   const netNames = new Set(nets.map((net) => net.name));
 
   for (const pin of snapshot.pins) {
-    if (components.length > 0 && !componentIds.has(pin.componentPrimitiveId)) {
+    if (components.length > 0 && !componentKeys.has(scopedKey(pin.page, pin.componentPrimitiveId))) {
       continue;
     }
     if (!pin.connected) {
@@ -635,7 +688,7 @@ function buildPassiveGraph(snapshot: SchematicSnapshot): PassiveGraph {
     if (!kind || !component.primitiveId) {
       continue;
     }
-    const pins = snapshot.pins.filter((pin) => pin.componentPrimitiveId === component.primitiveId && pin.nodeId);
+    const pins = snapshot.pins.filter((pin) => pinOwnedByComponent(pin, component) && pin.nodeId);
     const nodeIds = unique(pins.map((pin) => pin.nodeId).filter(isPresent));
     if (nodeIds.length !== 2) {
       continue;
@@ -679,7 +732,7 @@ function resolveEndpoint(snapshot: SchematicSnapshot, ref: EndpointRef): Endpoin
     return { ref, nodeIds: [], pins: [], components: [], nets: [], reason: "No matching component was found." };
   }
   const pins = snapshot.pins
-    .filter((pin) => pin.componentPrimitiveId === component.primitiveId || sameText(pin.componentDesignator, component.designator))
+    .filter((pin) => pinBelongsToComponent(pin, component))
     .filter((pin) => !ref.pin || sameText(pin.pinNumber, ref.pin))
     .filter((pin) => !ref.pinName || sameText(pin.pinName, ref.pinName));
   return {
@@ -957,6 +1010,7 @@ function resolveConnectivity(
   pins: SchematicPin[],
   wires: SchematicWire[],
   labels: SchematicLabel[],
+  page?: SchematicPageRef,
   tolerance = 0.01
 ): {
   pins: SchematicPin[];
@@ -968,7 +1022,7 @@ function resolveConnectivity(
     wire,
     segments: extractSegments(wire.geometry)
   }));
-  const groups = buildConnectivityGroups(wireData, labels, tolerance);
+  const groups = buildConnectivityGroups(wireData, labels, tolerance, page);
   const resolvedWires = wires.map((wire, index) => {
     const group = groups.find((item) => item.wireIndexes.includes(index));
     return {
@@ -1072,7 +1126,7 @@ function resolvePinConnectivity(pin: SchematicPin, groups: ConnectivityGroup[], 
   };
 }
 
-function buildConnectivityGroups(wireData: WireWithSegments[], labels: SchematicLabel[], tolerance: number): ConnectivityGroup[] {
+function buildConnectivityGroups(wireData: WireWithSegments[], labels: SchematicLabel[], tolerance: number, page?: SchematicPageRef): ConnectivityGroup[] {
   const parent = wireData.map((_, index) => index);
   const find = (index: number): number => {
     while (parent[index] !== index) {
@@ -1116,7 +1170,8 @@ function buildConnectivityGroups(wireData: WireWithSegments[], labels: Schematic
       ? wireNetNames[0]
       : wireNetNames.length === 0 && labelNetNames.length === 1 ? labelNetNames[0] : undefined;
     return {
-      nodeId: net ? netNodeId(net) : `node:${groupIndex + 1}`,
+      // Named groups share a global net node; unnamed groups stay page-local.
+      nodeId: net ? netNodeId(net) : page ? `node:${page.uuid}:${groupIndex + 1}` : `node:${groupIndex + 1}`,
       wireIndexes,
       segments,
       net,
@@ -1361,7 +1416,8 @@ function pinEvidence(pin: SchematicPin): Record<string, unknown> {
     nodeId: pin.nodeId,
     connected: pin.connected,
     position: pin.position,
-    primitiveId: pin.primitiveId
+    primitiveId: pin.primitiveId,
+    page: pin.page
   };
 }
 
@@ -1439,11 +1495,34 @@ function intersects(left: string[], right: string[]): boolean {
   return left.some((item) => rightSet.has(item));
 }
 
-function uniqueByPrimitiveId<T extends { primitiveId?: string }>(items: T[]): T[] {
+/** Internal unique key: primitiveIds are only unique within one schematic page. */
+function scopedKey(page: SchematicPageRef | undefined, primitiveId: string | undefined): string | undefined {
+  if (primitiveId === undefined) {
+    return undefined;
+  }
+  return page ? `${page.uuid}\u0000${primitiveId}` : primitiveId;
+}
+
+/** Same primitive on the same page (the raw primitiveId alone is ambiguous across pages). */
+function pinOwnedByComponent(pin: SchematicPin, component: SchematicComponent): boolean {
+  return component.primitiveId !== undefined
+    && scopedKey(pin.page, pin.componentPrimitiveId) === scopedKey(component.page, component.primitiveId);
+}
+
+/**
+ * Owned pins plus pins of every part sharing the designator, so multi-part
+ * components split across pages (U1.A on page 1, U1.B on page 2) resolve as one.
+ */
+function pinBelongsToComponent(pin: SchematicPin, component: SchematicComponent): boolean {
+  return pinOwnedByComponent(pin, component)
+    || (component.designator !== undefined && sameText(pin.componentDesignator, component.designator));
+}
+
+function uniqueByPrimitiveId<T extends { primitiveId?: string; page?: SchematicPageRef }>(items: T[]): T[] {
   const seen = new Set<string>();
   const output: T[] = [];
   for (const item of items) {
-    const key = item.primitiveId ?? JSON.stringify(item);
+    const key = scopedKey(item.page, item.primitiveId) ?? JSON.stringify(item);
     if (!seen.has(key)) {
       seen.add(key);
       output.push(item);
