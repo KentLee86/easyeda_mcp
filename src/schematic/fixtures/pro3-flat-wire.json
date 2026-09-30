@@ -1,0 +1,39 @@
+{
+  "_comment": "Modeled on EasyEDA Pro 3.2.149 live data: sch_PrimitiveWire.getAll() returns `line` as a flat [x1,y1,x2,y2, x3,y3,x4,y4, ...] segment list; pin {x,y} coincide with segment endpoints; the GND netflag carries its name only in `value`.",
+  "components": [
+    { "primitiveType": "Component", "componentType": "part", "primitiveId": "e1", "designator": "U1", "value": "TPS61023", "x": 100, "y": -160 },
+    { "primitiveType": "Component", "componentType": "part", "primitiveId": "e2", "designator": "C1", "value": "10uF", "x": 190, "y": -160 },
+    { "primitiveType": "Component", "componentType": "part", "primitiveId": "e3", "designator": "R1", "value": "100k", "x": 290, "y": -230 },
+    { "primitiveType": "Component", "componentType": "netflag", "primitiveId": "e4", "value": "GND", "x": 170, "y": -280 }
+  ],
+  "pinsByComponent": {
+    "e1": [
+      { "primitiveId": "e1p10", "pinNumber": "10", "pinName": "GND", "x": 130, "y": -220 },
+      { "primitiveId": "e1p1", "pinNumber": "1", "pinName": "VIN", "x": 130, "y": -100 },
+      { "primitiveId": "e1p3", "pinNumber": "3", "pinName": "EN", "x": 130, "y": -140 }
+    ],
+    "e2": [
+      { "primitiveId": "e2p1", "pinNumber": "1", "pinName": "1", "x": 190, "y": -100 },
+      { "primitiveId": "e2p2", "pinNumber": "2", "pinName": "2", "x": 190, "y": -220 }
+    ],
+    "e3": [
+      { "primitiveId": "e3p1", "pinNumber": "1", "pinName": "1", "x": 290, "y": -210 },
+      { "primitiveId": "e3p2", "pinNumber": "2", "pinName": "2", "x": 290, "y": -250 }
+    ],
+    "e4": [
+      { "primitiveId": "e4p1", "pinNumber": "1", "pinName": "GND", "x": 170, "y": -260 }
+    ]
+  },
+  "wires": [
+    {
+      "primitiveId": "ie3223",
+      "net": "TIDA-01095_Sheet1-altium-import_GND_POWER_GROUND",
+      "line": [190, -220, 170, -220, 170, -220, 170, -260, 190, -260, 170, -260, 290, -250, 290, -260, 290, -260, 190, -260, 170, -220, 130, -220]
+    },
+    {
+      "primitiveId": "ie3224",
+      "net": "TIDA-01095_Sheet1-altium-import_VIN",
+      "line": [130, -100, 190, -100]
+    }
+  ]
+}

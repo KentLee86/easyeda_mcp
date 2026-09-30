@@ -58,7 +58,10 @@ export type SchematicLabel = {
   primitiveId?: string;
   net?: string;
   type?: string;
+  nodeId?: string;
   position: Position;
+  /** Pin positions of netflag/netport components; these are where the flag actually touches a wire. */
+  connectionPoints?: Position[];
   raw?: unknown;
 };
 
@@ -226,11 +229,19 @@ export function buildSchematicSnapshot(raw: RawSchematicData): SchematicSnapshot
   }
 
   const wires = (raw.wires ?? []).map((wire) => normalizeWire(wire, includeRaw));
-  const labels = [
-    ...rawComponents.flatMap((component) => normalizeComponentLabel(component, includeRaw)),
+  const componentLabels = rawComponents.flatMap((component) => normalizeComponentLabel(component, includeRaw)).map((label) => {
+    const connectionPoints = pins
+      .filter((pin) => label.primitiveId && pin.componentPrimitiveId === label.primitiveId)
+      .map((pin) => pin.position)
+      .filter((position) => requiredPosition(position));
+    return connectionPoints.length > 0 ? { ...label, connectionPoints } : label;
+  });
+  const rawLabels = [
+    ...componentLabels,
     ...(raw.texts ?? []).flatMap((text) => normalizeTextLabel(text, includeRaw))
   ];
-  const resolved = resolveConnectivity(pins, wires, labels);
+  const resolved = resolveConnectivity(pins, wires, rawLabels);
+  const labels = resolved.labels;
   const nets = buildNets(resolved.pins, resolved.wires, labels);
   const warnings: string[] = [];
 
@@ -849,7 +860,9 @@ function normalizeWire(raw: unknown, includeRaw: boolean): SchematicWire {
 function normalizeComponentLabel(raw: unknown, includeRaw: boolean): SchematicLabel[] {
   const item = asRecord(raw);
   const componentType = stringValue(item.componentType ?? item.primitiveType);
-  const net = normalizeNetName(item.net ?? item.netName);
+  const otherProperty = asRecord(item.otherProperty);
+  // Netflag/netport components may carry their net name only as the value (e.g. "GND").
+  const net = normalizeNetName(item.net ?? item.netName ?? item.value ?? otherProperty.Value);
   if (!net || !componentType || !["netflag", "netport", "short_symbol"].includes(componentType)) {
     return [];
   }
@@ -890,12 +903,17 @@ function buildNets(pins: SchematicPin[], wires: SchematicWire[], labels: Schemat
   for (const label of labels) if (label.net) names.add(label.net);
 
   return [...names].sort((a, b) => a.localeCompare(b)).map((name) => {
-    const connectedPins = pins.filter((pin) => sameText(pin.net, name));
-    const netWires = wires.filter((wire) => sameText(wire.net, name));
     const netLabels = labels.filter((label) => sameText(label.net, name));
+    // A label (e.g. netflag "GND") touching a wire group whose wire net has a
+    // different name (e.g. "Sheet1_GND_POWER_GROUND") makes this name an alias
+    // of that group's node.
+    const aliasNodeIds = new Set(netLabels.map((label) => label.nodeId).filter(isPresent));
+    const connectedPins = pins.filter((pin) => sameText(pin.net, name) || (pin.nodeId !== undefined && aliasNodeIds.has(pin.nodeId)));
+    const netWires = wires.filter((wire) => sameText(wire.net, name) || (wire.nodeId !== undefined && aliasNodeIds.has(wire.nodeId)));
     const nodeIds = unique([
       ...connectedPins.map((pin) => pin.nodeId).filter(isPresent),
-      ...netWires.map((wire) => wire.nodeId).filter(isPresent)
+      ...netWires.map((wire) => wire.nodeId).filter(isPresent),
+      ...aliasNodeIds
     ]);
     return {
       name,
@@ -943,6 +961,7 @@ function resolveConnectivity(
 ): {
   pins: SchematicPin[];
   wires: SchematicWire[];
+  labels: SchematicLabel[];
   warnings: string[];
 } {
   const wireData = wires.map((wire) => ({
@@ -962,9 +981,15 @@ function resolveConnectivity(
     .filter((group) => !group.net && group.wireIndexes.length > 0)
     .map((group) => `Wire group ${group.wirePrimitiveIds.join(", ")} has ambiguous or missing net evidence.`);
 
+  const resolvedLabels = labels.map((label) => {
+    const group = groups.find((item) => labelTouchesSegments(label, item.segments, tolerance));
+    return group ? { ...label, nodeId: group.nodeId } : label;
+  });
+
   return {
     pins: pins.map((pin) => resolvePinConnectivity(pin, groups, tolerance)),
     wires: resolvedWires,
+    labels: resolvedLabels,
     warnings
   };
 }
@@ -1085,7 +1110,11 @@ function buildConnectivityGroups(wireData: WireWithSegments[], labels: Schematic
     const touchingLabels = labels.filter((label) => labelTouchesSegments(label, segments, tolerance));
     const labelNetNames = unique(touchingLabels.map((label) => label.net).filter(isPresent));
     const allNetNames = unique([...wireNetNames, ...labelNetNames]);
-    const net = allNetNames.length === 1 ? allNetNames[0] : undefined;
+    // The editor-computed wire net is authoritative; label names only name
+    // groups without a wire net (they remain aliases via netNames otherwise).
+    const net = wireNetNames.length === 1
+      ? wireNetNames[0]
+      : wireNetNames.length === 0 && labelNetNames.length === 1 ? labelNetNames[0] : undefined;
     return {
       nodeId: net ? netNodeId(net) : `node:${groupIndex + 1}`,
       wireIndexes,
@@ -1104,15 +1133,14 @@ function extractSegments(value: unknown): Segment[] {
   if (!Array.isArray(value)) {
     return [];
   }
+  if (value.length > 0 && value.every((item) => numberValue(item) !== undefined)) {
+    return segmentsFromFlatNumbers(value as number[]);
+  }
   const segments: Segment[] = [];
   const points: Required<Position>[] = [];
   for (const item of value) {
     if (Array.isArray(item) && item.length >= 4) {
-      const start = requiredPosition({ x: numberValue(item[0]), y: numberValue(item[1]) });
-      const end = requiredPosition({ x: numberValue(item[2]), y: numberValue(item[3]) });
-      if (start && end) {
-        segments.push({ start, end });
-      }
+      segments.push(...segmentsFromFlatNumbers(item));
       continue;
     }
     const point = Array.isArray(item)
@@ -1124,6 +1152,44 @@ function extractSegments(value: unknown): Segment[] {
   }
   for (let index = 1; index < points.length; index += 1) {
     segments.push({ start: points[index - 1], end: points[index] });
+  }
+  return segments;
+}
+
+/**
+ * EasyEDA Pro 3.x `sch_PrimitiveWire.getAll()` returns `line` as a flat number
+ * array of concatenated segments: `[x1, y1, x2, y2, x3, y3, x4, y4, ...]`, i.e.
+ * every 4 numbers is one independent segment (shared points are repeated, and
+ * a single wire primitive may be a branching tree, not a path). So a length
+ * that is a multiple of 4 is chunked into 4-number segments.
+ * Fallback: an even length that is not a multiple of 4 cannot be a segment
+ * list, so it is read as a polyline of (x, y) points. Odd lengths or
+ * non-numeric entries are malformed and yield no segments.
+ */
+function segmentsFromFlatNumbers(values: unknown[]): Segment[] {
+  const numbers = values.map(numberValue);
+  if (numbers.length < 4 || numbers.some((item) => item === undefined)) {
+    return [];
+  }
+  const coords = numbers as number[];
+  const segments: Segment[] = [];
+  if (coords.length % 4 === 0) {
+    for (let index = 0; index < coords.length; index += 4) {
+      segments.push({
+        start: { x: coords[index], y: coords[index + 1] },
+        end: { x: coords[index + 2], y: coords[index + 3] }
+      });
+    }
+    return segments;
+  }
+  if (coords.length % 2 !== 0) {
+    return [];
+  }
+  for (let index = 2; index < coords.length; index += 2) {
+    segments.push({
+      start: { x: coords[index - 2], y: coords[index - 1] },
+      end: { x: coords[index], y: coords[index + 1] }
+    });
   }
   return segments;
 }
@@ -1142,9 +1208,11 @@ function segmentTouchesSegment(left: Segment, right: Segment, tolerance: number)
 function labelTouchesSegments(label: SchematicLabel, segments: Segment[], tolerance: number): boolean {
   const point = requiredPosition(label.position);
   if (!point) {
-    return false;
+    return (label.connectionPoints ?? []).map(requiredPosition).filter(isPresent)
+      .some((candidate) => segments.some((segment) => pointTouchesSegment(candidate, segment, tolerance)));
   }
-  const candidates = [point, { x: point.x, y: -point.y }];
+  const connectionPoints = (label.connectionPoints ?? []).map(requiredPosition).filter(isPresent);
+  const candidates = [point, { x: point.x, y: -point.y }, ...connectionPoints];
   return candidates.some((candidate) => segments.some((segment) => pointTouchesSegment(candidate, segment, tolerance)));
 }
 
@@ -1306,7 +1374,19 @@ function inferEndpoints(value: unknown): Position[] | undefined {
   if (segments.length === 0) {
     return undefined;
   }
-  return [segments[0].start, segments[segments.length - 1].end];
+  // Pro 3.x wires can be segment trees, so "first start / last end" is not
+  // meaningful; report the dangling points (used by exactly one segment).
+  const counts = new Map<string, { point: Required<Position>; count: number }>();
+  for (const segment of segments) {
+    for (const point of [segment.start, segment.end]) {
+      const key = `${point.x},${point.y}`;
+      const entry = counts.get(key) ?? { point, count: 0 };
+      entry.count += 1;
+      counts.set(key, entry);
+    }
+  }
+  const dangling = [...counts.values()].filter((entry) => entry.count === 1).map((entry) => entry.point);
+  return dangling.length > 0 ? dangling : [segments[0].start, segments[segments.length - 1].end];
 }
 
 function asRecord(value: unknown): Record<string, unknown> {

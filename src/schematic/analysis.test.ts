@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   buildSchematicSnapshot,
@@ -6,8 +7,13 @@ import {
   traceComponent,
   traceNet,
   validateSchematicArea,
-  verifyConnections
+  verifyConnections,
+  type RawSchematicData
 } from "./analysis.js";
+
+function loadFixture(name: string): RawSchematicData {
+  return JSON.parse(readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf8")) as RawSchematicData;
+}
 
 describe("schematic analysis", () => {
   it("normalizes components, pins, wires, labels, and nets", () => {
@@ -418,6 +424,76 @@ describe("schematic analysis", () => {
     ]);
 
     expect(result.checks.map((check) => check.status)).toEqual(["pass", "pass", "pass", "pass", "pass"]);
+  });
+
+  describe("EasyEDA Pro 3.x flat wire geometry", () => {
+    const GND_WIRE_NET = "TIDA-01095_Sheet1-altium-import_GND_POWER_GROUND";
+
+    it("chunks a flat [x1,y1,x2,y2,...] line into segments and propagates the wire net to touching pins", () => {
+      const snapshot = buildSchematicSnapshot({ ...loadFixture("pro3-flat-wire.json"), includeRaw: false });
+
+      const pinNet = (designator: string, pinNumber: string) =>
+        snapshot.pins.find((item) => item.componentDesignator === designator && item.pinNumber === pinNumber);
+      expect(pinNet("U1", "10")?.net).toBe(GND_WIRE_NET);
+      expect(pinNet("U1", "10")?.netSource).toBe("wire_inferred");
+      expect(pinNet("C1", "2")?.net).toBe(GND_WIRE_NET);
+      expect(pinNet("R1", "2")?.net).toBe(GND_WIRE_NET);
+      expect(pinNet("U1", "1")?.net).toBe("TIDA-01095_Sheet1-altium-import_VIN");
+      expect(pinNet("C1", "1")?.net).toBe("TIDA-01095_Sheet1-altium-import_VIN");
+
+      const gndWire = snapshot.wires.find((item) => item.primitiveId === "ie3223");
+      expect(gndWire?.endpoints).toEqual(expect.arrayContaining([{ x: 190, y: -220 }, { x: 290, y: -250 }, { x: 130, y: -220 }]));
+      expect(gndWire?.endpoints).toHaveLength(3);
+
+      const unconnected = findUnconnectedPins(snapshot);
+      expect(unconnected.pins.map((item) => `${item.componentDesignator}#${item.pinNumber}`).sort()).toEqual(["R1#1", "U1#3"]);
+    });
+
+    it("resolves pin_on_net and traceNet by the wire net name", () => {
+      const snapshot = buildSchematicSnapshot({ ...loadFixture("pro3-flat-wire.json"), includeRaw: false });
+
+      const result = verifyConnections(snapshot, [
+        { type: "pin_on_net", component: "U1", pin: "10", net: GND_WIRE_NET },
+        { type: "same_node", left: { component: "U1", pin: "10" }, right: { component: "R1", pin: "2" } }
+      ]);
+      expect(result.checks.map((check) => check.status)).toEqual(["pass", "pass"]);
+
+      const traced = traceNet(snapshot, GND_WIRE_NET);
+      expect(traced.net?.name).toBe(GND_WIRE_NET);
+      expect(traced.net?.connectedPins.map((item) => item.primitiveId).sort())
+        .toEqual(["e1p10", "e2p2", "e3p2", "e4p1"]);
+      expect(traced.findings).toHaveLength(0);
+    });
+
+    it("treats a value-only netflag touching the wire group (via its pin) as an alias of the wire net", () => {
+      const snapshot = buildSchematicSnapshot({ ...loadFixture("pro3-flat-wire.json"), includeRaw: false });
+
+      const flag = snapshot.labels.find((item) => item.primitiveId === "e4");
+      expect(flag?.net).toBe("GND");
+      expect(flag?.nodeId).toBe(snapshot.pins.find((item) => item.primitiveId === "e1p10")?.nodeId);
+
+      const result = verifyConnections(snapshot, [
+        { type: "pin_on_net", component: "U1", pin: "10", net: "GND" },
+        { type: "decoupled_to_net", power: { component: "U1", pin: "1" }, referenceNet: "GND" }
+      ]);
+      expect(result.checks.map((check) => check.status)).toEqual(["pass", "pass"]);
+
+      const traced = traceNet(snapshot, "GND");
+      expect(traced.net?.name).toBe("GND");
+      expect(traced.net?.connectedPins.map((item) => item.primitiveId).sort()).toEqual(["e1p10", "e2p2", "e3p2", "e4p1"]);
+    });
+
+    it("reads an even-but-not-multiple-of-4 flat line as a polyline of points", () => {
+      const snapshot = buildSchematicSnapshot({
+        components: [component("U9", "$u9", "IC")],
+        pinsByComponent: { $u9: [pinAt("1", "A", undefined, 40, 20)] },
+        wires: [wirePath("POLY", [0, 0, 40, 0, 40, 20])],
+        includeRaw: false
+      });
+
+      expect(snapshot.pins[0]?.net).toBe("POLY");
+      expect(snapshot.wires[0]?.endpoints).toEqual([{ x: 0, y: 0 }, { x: 40, y: 20 }]);
+    });
   });
 });
 
