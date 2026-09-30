@@ -1,0 +1,8 @@
+[["easyeda_doctor",{},300],
+ ["easyeda_pcb_snapshot",{"include":["components"]},200],
+ ["easyeda_pcb_drc",{},200],
+ ["easyeda_api_call",{"path":"pcb_PrimitiveVia.getAllPrimitiveId"},150],
+ ["easyeda_api_call",{"path":"pcb_PrimitiveComponent.modify","args":["ie344",{"x":5600}]},250],
+ ["easyeda_pcb_move_component",{"designator":"U1","dx":10,"confirmation":"CONFIRM move U1"},300],
+ ["easyeda_pcb_move_component",{"designator":"U1","dx":-10,"confirmation":"CONFIRM move U1"},200],
+ ["easyeda_render_view",{"designator":"U1"},200]]

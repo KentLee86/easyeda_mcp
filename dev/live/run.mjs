@@ -18,7 +18,8 @@ const outDir = "dev/live/.work/results";
 fs.mkdirSync(outDir, { recursive: true });
 
 const client = new Client({ name: "easyeda-live-check", version: "0" });
-await client.connect(new StdioClientTransport({ command: "node", args: [serverEntry], stderr: "inherit" }));
+// The SDK passes only a minimal environment by default; keep EASYEDA_MCP_* etc.
+await client.connect(new StdioClientTransport({ command: "node", args: [serverEntry], stderr: "inherit", env: { ...process.env } }));
 
 const started = Date.now();
 if (!args.includes("--no-inject")) {

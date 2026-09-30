@@ -10,5 +10,6 @@ tty=()
 [ -t 0 ] && tty=(-t)
 exec docker run --rm -i "${tty[@]}" --network "container:$name" \
     -u "$(id -u):$(id -g)" -e HOME=/tmp \
+    -e EASYEDA_MCP_CONFIG_DIR="${EASYEDA_MCP_CONFIG_DIR:-/repo/dev/live/.work/config}" \
     -v "$repo":/repo -w /repo \
     node:22-slim "$@"

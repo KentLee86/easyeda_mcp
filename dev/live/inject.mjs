@@ -26,6 +26,16 @@ export async function bundleExtension() {
  */
 export function injectionSource(bundle, { native = true, config = {} } = {}) {
   return `(() => {
+  // An installed copy of the extension keeps its state on this global; park it
+  // (no heartbeat, no reconnects) so the two do not keep taking the bridge from
+  // each other. MCP Bridge -> Reconnect in the editor resumes it.
+  const installed = globalThis.easyedaMcpBridgeRuntime;
+  if (installed && installed.state) {
+    installed.state.disposed = true;
+    clearTimeout(installed.state.reconnectTimer);
+    clearTimeout(installed.state.openTimeoutTimer);
+    clearInterval(installed.state.heartbeatTimer);
+  }
   const previous = globalThis.__EASYEDA_MCP_DEV__;
   if (previous && typeof previous.deactivate === "function") {
     try { previous.deactivate(); } catch (error) { console.warn("previous deactivate failed", error); }
